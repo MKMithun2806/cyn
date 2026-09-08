@@ -2,8 +2,13 @@
 name = "cyn"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.75"
 license = "GPL-2.0-or-later"
 description = "A lightweight CLI vulnerability scanner built on OpenVAS"
+repository = "https://github.com/MKMithun2806/cyn"
+homepage = "https://github.com/MKMithun2806/cyn"
+keywords = ["security", "scanner", "openvas", "vulnerability", "cli"]
+categories = ["command-line-utilities", "parser-implementations"]
 
 [dependencies]
 scannerlib = { path = "openvas/rust" }
