@@ -83,14 +83,16 @@ pub fn update(
             &feed_path.display().to_string(),
         ])
         .output()
-        .map_err(|e| CynError::FeedUpdate(format!(
-            "rsync not found: {e}\n\
+        .map_err(|e| {
+            CynError::FeedUpdate(format!(
+                "rsync not found: {e}\n\
              Install rsync: sudo apk add rsync\n\
              Or download the feed manually:\n\
                greenbone-feed-sync --type nvts\n\
              Or copy to {dest}",
-            dest = feed_path.display()
-        )))?;
+                dest = feed_path.display()
+            ))
+        })?;
 
     // Always show rsync output so the user can see what happened
     let stdout = String::from_utf8_lossy(&output.stdout);
