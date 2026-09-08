@@ -23,6 +23,7 @@ impl Config {
     }
 
     /// Return the plugins folder path the scanner should use.
+    #[allow(dead_code)]
     pub fn plugins_folder(&self) -> &Path {
         &self.feed_path
     }
