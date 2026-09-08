@@ -141,7 +141,7 @@ fn build_scan_model(request: &ScanRequest) -> Result<models::Scan, CynError> {
     let excluded = request
         .exclude_hosts
         .as_ref()
-        .map(|list| list.iter().cloned().collect())
+        .map(|list| list.to_vec())
         .unwrap_or_default();
 
     Ok(models::Scan {

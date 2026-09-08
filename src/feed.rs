@@ -127,6 +127,7 @@ fn count_nasl_recursive(dir: &Path, count: &mut usize) -> Result<(), CynError> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::PathBuf;
 
     #[test]
     fn feed_status_nonexistent() {
