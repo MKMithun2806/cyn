@@ -71,7 +71,12 @@ async fn run(cli: Cli) -> Result<(), error::CynError> {
                 max_checks,
                 port_range: ports,
                 vt_oids,
-                exclude_hosts: exclude.map(|e| e.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()),
+                exclude_hosts: exclude.map(|e| {
+                    e.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                }),
             };
 
             let findings = scanner::run_scan(&config, &request).await?;

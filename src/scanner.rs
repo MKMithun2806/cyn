@@ -39,10 +39,7 @@ pub struct ScanRequest {
     pub exclude_hosts: Option<Vec<String>>,
 }
 
-pub async fn run_scan(
-    config: &Config,
-    request: &ScanRequest,
-) -> Result<Vec<Finding>, CynError> {
+pub async fn run_scan(config: &Config, request: &ScanRequest) -> Result<Vec<Finding>, CynError> {
     let feed_path = &config.feed_path;
 
     if !feed_path.exists() {
@@ -54,13 +51,13 @@ pub async fn run_scan(
     let storage = Arc::new(InMemoryStorage::new());
     let loader = Loader::from_feed_path(feed_path);
 
-    let verifier = HashSumNameLoader::sha256(&loader).map_err(|e| {
-        CynError::Scanner(format!("failed to create feed verifier: {e}"))
-    })?;
+    let verifier = HashSumNameLoader::sha256(&loader)
+        .map_err(|e| CynError::Scanner(format!("failed to create feed verifier: {e}")))?;
     let updater = Update::init("cyn", 5, loader.clone(), &storage, verifier);
-    updater.perform_update().await.map_err(|e| {
-        CynError::Scanner(format!("feed update failed: {e}"))
-    })?;
+    updater
+        .perform_update()
+        .await
+        .map_err(|e| CynError::Scanner(format!("feed update failed: {e}")))?;
 
     let models_scan = build_scan_model(request)?;
     let scan = Scan::default_to_localhost(models_scan);
@@ -82,9 +79,10 @@ pub async fn run_scan(
         .await
         .map_err(|e| CynError::Scanner(format!("scheduling failed: {e}")))?;
 
-    let runner: ScanRunner<Arc<InMemoryStorage>> =
-        ScanRunner::new(&storage, &loader, &executor, schedule, &scan, &None, rx_target)
-            .map_err(|e| CynError::Scanner(format!("failed to create scan runner: {e}")))?;
+    let runner: ScanRunner<Arc<InMemoryStorage>> = ScanRunner::new(
+        &storage, &loader, &executor, schedule, &scan, &None, rx_target,
+    )
+    .map_err(|e| CynError::Scanner(format!("failed to create scan runner: {e}")))?;
 
     let mut stream = Box::pin(runner.stream());
     while let Some(result) = stream.next().await {
@@ -145,10 +143,13 @@ fn build_scan_model(request: &ScanRequest) -> Result<models::Scan, CynError> {
         .unwrap_or_default();
 
     Ok(models::Scan {
-        scan_id: format!("cyn-{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()),
+        scan_id: format!(
+            "cyn-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ),
         target: models::Target {
             hosts,
             ports,
@@ -211,9 +212,7 @@ fn parse_ports(port_range: &Option<String>) -> Vec<models::Port> {
     }
 }
 
-async fn collect_findings(
-    _storage: &Arc<InMemoryStorage>,
-) -> Result<Vec<Finding>, CynError> {
+async fn collect_findings(_storage: &Arc<InMemoryStorage>) -> Result<Vec<Finding>, CynError> {
     Ok(vec![])
 }
 
