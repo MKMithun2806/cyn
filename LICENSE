@@ -1,0 +1,8 @@
+GNU General Public License v2.0 or later
+
+This project is licensed under the GNU General Public License v2.0 or later.
+See the COPYING file for the full license text.
+
+The scanner integration uses OpenVAS scanner technology which is also
+licensed under GPL-2.0-or-later. See the upstream repository for details:
+https://github.com/greenbone/openvas-scanner
