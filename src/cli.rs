@@ -62,9 +62,13 @@ pub enum FeedCommand {
 
     /// Update the local feed from upstream
     Update {
-        /// Upstream feed URL (rsync or HTTP)
+        /// Upstream feed base URL (rsync)
         #[arg(long)]
         url: Option<String>,
+
+        /// Feed release version (e.g., "24.10")
+        #[arg(long)]
+        feed_version: Option<String>,
 
         /// Verify feed signatures
         #[arg(long)]

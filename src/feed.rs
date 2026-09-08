@@ -1,8 +1,15 @@
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 use crate::config::Config;
 use crate::error::CynError;
+
+/// Default Greenbone community feed base URL.
+const DEFAULT_FEED_URL: &str = "rsync://feed.community.greenbone.net/community";
+
+/// Default feed release version (matches Greenbone's FEED_RELEASE).
+const DEFAULT_FEED_VERSION: &str = "24.10";
 
 /// Information about the local feed.
 #[derive(Debug)]
@@ -37,44 +44,92 @@ pub fn status(config: &Config) -> Result<FeedInfo, CynError> {
     })
 }
 
-/// Perform a feed update by synchronising from upstream.
+/// Perform a feed update by synchronising NASL scripts from upstream.
 ///
-/// Uses rsync if available, otherwise returns an error with instructions.
+/// Uses rsync to download the NVT feed. The user sees live rsync output.
 pub fn update(
     config: &Config,
     upstream_url: Option<&str>,
+    feed_version: Option<&str>,
     _signature_check: bool,
 ) -> Result<(), CynError> {
-    let url = upstream_url.unwrap_or("rsync://feed.community.greenbone.net/community-feed/");
+    let base_url = upstream_url.unwrap_or(DEFAULT_FEED_URL);
+    let version = feed_version.unwrap_or(DEFAULT_FEED_VERSION);
 
-    // Ensure feed directory exists
+    // The Greenbone community feed stores NASL scripts under:
+    //   vulnerability-feed/<VERSION>/vt-data/nasl/
+    let rsync_url = format!("{base_url}/vulnerability-feed/{version}/vt-data/nasl/");
+
     let feed_path = &config.feed_path;
     if !feed_path.exists() {
         fs::create_dir_all(feed_path).map_err(|e| CynError::FeedUpdate(format!("{e}")))?;
     }
 
-    // Try rsync
-    let status = std::process::Command::new("rsync")
+    println!("Syncing feed from:");
+    println!("  {rsync_url}");
+    println!("  -> {}", feed_path.display());
+    println!();
+
+    let output = Command::new("rsync")
         .args([
+            "--stats",
+            "--progress",
             "--delete",
             "--times",
             "--recursive",
             "--partial",
-            url,
+            "--compress",
+            &rsync_url,
             &feed_path.display().to_string(),
         ])
-        .status();
+        .output()
+        .map_err(|e| CynError::FeedUpdate(format!(
+            "rsync not found: {e}\n\
+             Install rsync: sudo apk add rsync\n\
+             Or download the feed manually:\n\
+               greenbone-feed-sync --type nvts\n\
+             Or copy to {dest}",
+            dest = feed_path.display()
+        )))?;
 
-    match status {
-        Ok(s) if s.success() => Ok(()),
-        Ok(s) => Err(CynError::FeedUpdate(format!(
-            "rsync exited with status {s}"
-        ))),
-        Err(e) => Err(CynError::FeedUpdate(format!(
-            "rsync not available: {e}. Install rsync or download the feed manually to {}",
-            feed_path.display()
-        ))),
+    // Always show rsync output so the user can see what happened
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if !stdout.is_empty() {
+        println!("{stdout}");
     }
+
+    if !output.status.success() {
+        let msg = if !stderr.is_empty() {
+            stderr.trim().to_string()
+        } else {
+            format!("rsync exited with status {}", output.status)
+        };
+
+        // Provide helpful guidance for common errors
+        if msg.contains("Unknown module") || msg.contains("does not exist") {
+            return Err(CynError::FeedUpdate(format!(
+                "{msg}\n\n\
+                 The feed URL module was not found on the server.\n\
+                 This can happen if:\n\
+                 1. The feed version {version} is not available\n\
+                 2. The Greenbone community feed server is temporarily down\n\
+                 3. The rsync module structure has changed\n\n\
+                 Try:\n\
+                 1. Check available versions at https://community.greenbone.net\n\
+                 2. Specify a different version: cyn feed update --url <URL>\n\
+                 3. Use greenbone-feed-sync: greenbone-feed-sync --type nvts\n\
+                 4. Download manually and place .nasl files in {}",
+                feed_path.display()
+            )));
+        }
+
+        return Err(CynError::FeedUpdate(msg));
+    }
+
+    println!("Feed sync complete.");
+    Ok(())
 }
 
 /// Read the feed version from `plugin_feed_info.inc`.
@@ -90,7 +145,6 @@ fn read_feed_version(feed_path: &Path) -> Result<String, CynError> {
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("PLUGIN_SET") {
-            // PLUGIN_SET = "202401011031"
             if let Some(start) = trimmed.find('"') {
                 if let Some(end) = trimmed[start + 1..].find('"') {
                     return Ok(trimmed[start + 1..start + 1 + end].to_string());
@@ -141,7 +195,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let feed = dir.path();
 
-        // Create plugin_feed_info.inc
         fs::write(
             feed.join("plugin_feed_info.inc"),
             r#"PLUGIN_SET = "202501011200";
@@ -151,7 +204,6 @@ FEED_VENDOR = "Greenbone AG";
         )
         .unwrap();
 
-        // Create some .nasl files
         fs::write(feed.join("test.nasl"), "exit(0);").unwrap();
         let sub = feed.join("subdir");
         fs::create_dir(&sub).unwrap();
