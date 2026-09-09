@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -14,7 +15,8 @@ use scannerlib::nasl::utils::scan_ctx::Target;
 use scannerlib::scanner::{Scan, ScanRunner};
 use scannerlib::scheduling::Scheduler;
 use scannerlib::storage::inmemory::InMemoryStorage;
-use scannerlib::storage::{Remover, ScanID};
+use scannerlib::storage::items::nvt::Feed;
+use scannerlib::storage::{Remover, Retriever, ScanID};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Finding {
@@ -60,7 +62,9 @@ pub async fn run_scan(config: &Config, request: &ScanRequest) -> Result<Vec<Find
         .await
         .map_err(|e| CynError::Scanner(format!("feed update failed: {e}")))?;
 
-    let models_scan = build_scan_model(request)?;
+    let vts = load_vts(&storage, request).await?;
+
+    let models_scan = build_scan_model(request, vts)?;
     let scan_id = models_scan.scan_id.clone();
     let scan = Scan::default_to_localhost(models_scan);
 
@@ -81,8 +85,20 @@ pub async fn run_scan(config: &Config, request: &ScanRequest) -> Result<Vec<Find
         .await
         .map_err(|e| CynError::Scanner(format!("scheduling failed: {e}")))?;
 
+    tracing::info!(
+        "scan started: {} target(s), {} VTs",
+        scan.targets.len(),
+        scan.vts.len()
+    );
+
     let runner: ScanRunner<Arc<InMemoryStorage>> = ScanRunner::new(
-        &storage, &loader, &executor, schedule, &scan, &None, rx_target,
+        &storage,
+        &loader,
+        &executor,
+        schedule,
+        &scan,
+        &None,
+        rx_target,
     )
     .map_err(|e| CynError::Scanner(format!("failed to create scan runner: {e}")))?;
 
@@ -110,9 +126,6 @@ pub async fn run_scan(config: &Config, request: &ScanRequest) -> Result<Vec<Find
         }
     }
 
-    // Drain all results that NASL scripts wrote to storage during execution.
-    // The reporting builtins (security_message, log_message, etc.) dispatch
-    // models::Result items keyed by ScanID while scripts run.
     let results = storage
         .remove(&ScanID(scan_id))
         .await
@@ -125,6 +138,41 @@ pub async fn run_scan(config: &Config, request: &ScanRequest) -> Result<Vec<Find
         .collect();
 
     Ok(findings)
+}
+
+async fn load_vts(
+    storage: &InMemoryStorage,
+    request: &ScanRequest,
+) -> Result<Vec<models::VT>, CynError> {
+    match &request.vt_oids {
+        Some(oids) if !oids.is_empty() => Ok(oids
+            .iter()
+            .map(|oid| models::VT {
+                oid: oid.clone(),
+                parameters: vec![],
+            })
+            .collect()),
+        _ => {
+            let all_vts = storage
+                .retrieve(&Feed)
+                .await
+                .map_err(|e| CynError::Scanner(format!("failed to retrieve VTs: {e}")))?;
+
+            match all_vts {
+                Some(vts) => {
+                    tracing::info!("loaded {} VTs from feed", vts.len());
+                    Ok(vts
+                        .iter()
+                        .map(|vt| models::VT {
+                            oid: vt.oid.clone(),
+                            parameters: vec![],
+                        })
+                        .collect())
+                }
+                None => Ok(vec![]),
+            }
+        }
+    }
 }
 
 fn result_to_finding(result: models::Result) -> Option<Finding> {
@@ -158,29 +206,17 @@ fn result_to_finding(result: models::Result) -> Option<Finding> {
     })
 }
 
-fn build_scan_model(request: &ScanRequest) -> Result<models::Scan, CynError> {
-    let hosts: Vec<String> = request
-        .target
-        .split(',')
-        .map(|h| h.trim().to_string())
-        .collect();
+fn build_scan_model(
+    request: &ScanRequest,
+    vts: Vec<models::VT>,
+) -> Result<models::Scan, CynError> {
+    let hosts = expand_targets(&request.target)?;
 
-    if hosts.is_empty() || hosts.iter().all(|h| h.is_empty()) {
+    if hosts.is_empty() {
         return Err(CynError::InvalidTarget(request.target.clone()));
     }
 
     let ports = parse_ports(&request.port_range);
-
-    let vts = match &request.vt_oids {
-        Some(oids) => oids
-            .iter()
-            .map(|oid| models::VT {
-                oid: oid.clone(),
-                parameters: vec![],
-            })
-            .collect(),
-        None => vec![],
-    };
 
     let excluded = request
         .exclude_hosts
@@ -218,6 +254,42 @@ fn build_scan_model(request: &ScanRequest) -> Result<models::Scan, CynError> {
             },
         ],
     })
+}
+
+fn expand_targets(target: &str) -> Result<Vec<String>, CynError> {
+    let mut hosts = Vec::new();
+    for part in target.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if let Some(cidr_pos) = part.find('/') {
+            let ip_str = &part[..cidr_pos];
+            let prefix: u32 = part[cidr_pos + 1..]
+                .parse()
+                .map_err(|_| CynError::InvalidTarget(part.to_string()))?;
+            let ip: IpAddr = ip_str
+                .parse()
+                .map_err(|_| CynError::InvalidTarget(part.to_string()))?;
+            match ip {
+                IpAddr::V4(ipv4) => {
+                    let ip_num = u32::from_be_bytes(ipv4.octets());
+                    let mask = !0u32 << (32 - prefix);
+                    let network = ip_num & mask;
+                    let broadcast = network | !mask;
+                    for addr in (network + 1)..broadcast {
+                        hosts.push(IpAddr::from(addr.to_be_bytes()).to_string());
+                    }
+                }
+                IpAddr::V6(_) => {
+                    hosts.push(part.to_string());
+                }
+            }
+        } else {
+            hosts.push(part.to_string());
+        }
+    }
+    Ok(hosts)
 }
 
 fn parse_ports(port_range: &Option<String>) -> Vec<models::Port> {
@@ -272,7 +344,7 @@ mod tests {
             vt_oids: None,
             exclude_hosts: None,
         };
-        let scan = build_scan_model(&req).unwrap();
+        let scan = build_scan_model(req, vec![]).unwrap();
         assert_eq!(scan.target.hosts, vec!["192.168.1.1"]);
         assert!(scan.vts.is_empty());
     }
@@ -287,7 +359,7 @@ mod tests {
             vt_oids: None,
             exclude_hosts: Some(vec!["10.0.0.3".into()]),
         };
-        let scan = build_scan_model(&req).unwrap();
+        let scan = build_scan_model(req, vec![]).unwrap();
         assert_eq!(scan.target.hosts.len(), 2);
         assert_eq!(scan.target.excluded_hosts, vec!["10.0.0.3"]);
         assert!(!scan.target.ports.is_empty());
@@ -303,7 +375,19 @@ mod tests {
             vt_oids: None,
             exclude_hosts: None,
         };
-        assert!(build_scan_model(&req).is_err());
+        assert!(build_scan_model(req, vec![]).is_err());
+    }
+
+    #[test]
+    fn expand_cidr() {
+        let hosts = expand_targets("192.168.1.0/30").unwrap();
+        assert_eq!(hosts, vec!["192.168.1.1", "192.168.1.2"]);
+    }
+
+    #[test]
+    fn expand_mixed() {
+        let hosts = expand_targets("10.0.0.1, 192.168.1.0/30").unwrap();
+        assert_eq!(hosts, vec!["10.0.0.1", "192.168.1.1", "192.168.1.2"]);
     }
 
     #[test]
