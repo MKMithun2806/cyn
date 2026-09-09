@@ -131,13 +131,36 @@ pub async fn run_scan(config: &Config, request: &ScanRequest) -> Result<Vec<Find
         .await
         .map_err(|e| CynError::Scanner(format!("failed to retrieve results: {e}")))?;
 
-    let findings = results
-        .unwrap_or_default()
+    let raw_results = results.unwrap_or_default();
+
+    // Pre-fetch VT metadata for all OIDs found in results
+    let vt_metadata = build_vt_metadata_map(&storage, &raw_results).await;
+
+    let findings = raw_results
         .into_iter()
-        .filter_map(result_to_finding)
+        .filter_map(|r| result_to_finding(r, &vt_metadata))
         .collect();
 
     Ok(findings)
+}
+
+async fn build_vt_metadata_map(
+    storage: &InMemoryStorage,
+    results: &[models::Result],
+) -> std::collections::HashMap<String, models::VTData> {
+    use std::collections::HashSet;
+    let oids: HashSet<&str> = results
+        .iter()
+        .filter_map(|r| r.oid.as_deref())
+        .collect();
+
+    let mut map = std::collections::HashMap::new();
+    for oid in oids {
+        if let Ok(Some(vt_data)) = storage.retrieve(&scannerlib::storage::items::nvt::Oid(oid.to_string())).await {
+            map.insert(oid.to_string(), vt_data);
+        }
+    }
+    map
 }
 
 async fn load_vts(
@@ -175,7 +198,10 @@ async fn load_vts(
     }
 }
 
-fn result_to_finding(result: models::Result) -> Option<Finding> {
+fn result_to_finding(
+    result: models::Result,
+    vt_metadata: &std::collections::HashMap<String, models::VTData>,
+) -> Option<Finding> {
     let result_type = match result.r_type {
         models::ResultType::Alarm => "Alarm",
         models::ResultType::Log => "Log",
@@ -187,6 +213,31 @@ fn result_to_finding(result: models::Result) -> Option<Finding> {
     };
 
     let host = result.ip_address.or(result.hostname).unwrap_or_default();
+    let oid = result.oid.clone().unwrap_or_default();
+
+    // Look up VT metadata for name, severity, CVEs, etc.
+    let (name, severity, solution, references, cves) =
+        if let Some(vt) = result.oid.as_ref().and_then(|o| vt_metadata.get(o)) {
+            let name = vt.name.clone();
+            let severity = vt
+                .tag
+                .get(&models::TagKey::CvssBase)
+                .and_then(|v| v.to_string().parse().ok());
+            let solution = vt
+                .tag
+                .get(&models::TagKey::Solution)
+                .map(|v| v.to_string());
+            let cves: Vec<String> = vt
+                .references
+                .iter()
+                .filter(|r| r.class == "cve")
+                .map(|r| r.id.clone())
+                .collect();
+            let refs: Vec<String> = vt.references.iter().map(|r| format!("{}: {}", r.class, r.id)).collect();
+            (name, severity, solution, refs, cves)
+        } else {
+            (String::new(), None, None, vec![], vec![])
+        };
 
     Some(Finding {
         host,
@@ -195,13 +246,13 @@ fn result_to_finding(result: models::Result) -> Option<Finding> {
             models::Protocol::TCP => "tcp".to_string(),
             models::Protocol::UDP => "udp".to_string(),
         }),
-        oid: result.oid.unwrap_or_default(),
-        name: String::new(),
-        severity: None,
-        cves: vec![],
+        oid,
+        name,
+        severity,
+        cves,
         description: result.message.clone(),
-        solution: None,
-        references: vec![],
+        solution,
+        references,
         result_type: result_type.to_string(),
     })
 }
