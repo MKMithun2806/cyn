@@ -14,6 +14,7 @@ use scannerlib::nasl::utils::scan_ctx::Target;
 use scannerlib::scanner::{Scan, ScanRunner};
 use scannerlib::scheduling::Scheduler;
 use scannerlib::storage::inmemory::InMemoryStorage;
+use scannerlib::storage::{Remover, ScanID};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Finding {
@@ -60,6 +61,7 @@ pub async fn run_scan(config: &Config, request: &ScanRequest) -> Result<Vec<Find
         .map_err(|e| CynError::Scanner(format!("feed update failed: {e}")))?;
 
     let models_scan = build_scan_model(request)?;
+    let scan_id = models_scan.scan_id.clone();
     let scan = Scan::default_to_localhost(models_scan);
 
     let capacity = scan.targets.len().max(1);
@@ -108,8 +110,52 @@ pub async fn run_scan(config: &Config, request: &ScanRequest) -> Result<Vec<Find
         }
     }
 
-    let findings = collect_findings(&storage).await?;
+    // Drain all results that NASL scripts wrote to storage during execution.
+    // The reporting builtins (security_message, log_message, etc.) dispatch
+    // models::Result items keyed by ScanID while scripts run.
+    let results = storage
+        .remove(&ScanID(scan_id))
+        .await
+        .map_err(|e| CynError::Scanner(format!("failed to retrieve results: {e}")))?;
+
+    let findings = results
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(result_to_finding)
+        .collect();
+
     Ok(findings)
+}
+
+fn result_to_finding(result: models::Result) -> Option<Finding> {
+    let result_type = match result.r_type {
+        models::ResultType::Alarm => "Alarm",
+        models::ResultType::Log => "Log",
+        models::ResultType::Error => "Error",
+        models::ResultType::HostStart => return None,
+        models::ResultType::HostEnd => return None,
+        models::ResultType::DeadHost => return None,
+        models::ResultType::HostDetail => return None,
+    };
+
+    let host = result.ip_address.or(result.hostname).unwrap_or_default();
+
+    Some(Finding {
+        host,
+        port: result.port,
+        protocol: result.protocol.map(|p| match p {
+            models::Protocol::TCP => "tcp".to_string(),
+            models::Protocol::UDP => "udp".to_string(),
+        }),
+        oid: result.oid.unwrap_or_default(),
+        name: String::new(),
+        severity: None,
+        cves: vec![],
+        description: result.message.clone(),
+        solution: None,
+        references: vec![],
+        result_type: result_type.to_string(),
+    })
 }
 
 fn build_scan_model(request: &ScanRequest) -> Result<models::Scan, CynError> {
@@ -210,10 +256,6 @@ fn parse_ports(port_range: &Option<String>) -> Vec<models::Port> {
             range: ranges,
         }]
     }
-}
-
-async fn collect_findings(_storage: &Arc<InMemoryStorage>) -> Result<Vec<Finding>, CynError> {
-    Ok(vec![])
 }
 
 #[cfg(test)]
