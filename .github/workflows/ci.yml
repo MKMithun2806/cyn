@@ -85,3 +85,19 @@ jobs:
             libssh2-1-dev \
             zlib1g-dev
       - run: cargo test --all-targets
+
+  build-flags:
+    name: Verify build flags
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check .cargo/config.toml exists
+        run: test -f .cargo/config.toml
+      - name: Verify crt-static is disabled
+        run: |
+          if grep -q "target-feature=-crt-static" .cargo/config.toml; then
+            echo "OK: crt-static disabled (required for bindgen/libclang)"
+          else
+            echo "FAIL: .cargo/config.toml missing target-feature=-crt-static"
+            exit 1
+          fi
