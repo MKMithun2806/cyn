@@ -9,6 +9,7 @@ repository = "https://github.com/MKMithun2806/cyn"
 homepage = "https://github.com/MKMithun2806/cyn"
 keywords = ["security", "scanner", "openvas", "vulnerability", "cli"]
 categories = ["command-line-utilities", "parser-implementations"]
+publish = false
 
 [dependencies]
 scannerlib = { path = "openvas/rust" }
