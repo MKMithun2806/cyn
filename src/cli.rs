@@ -45,13 +45,21 @@ pub enum Command {
         #[arg(long)]
         vt: Option<String>,
 
-        /// Port range to scan (e.g., "1-1024" or "22,80,443")
+        /// Port range to scan (e.g., "1-1024" or "22,80,443"). Default: all 65535 ports.
         #[arg(long)]
         ports: Option<String>,
+
+        /// Import ports from nmap XML output file (e.g., -n scan.xml)
+        #[arg(long, short = 'n')]
+        nmap: Option<PathBuf>,
 
         /// Exclude hosts from scan
         #[arg(long)]
         exclude: Option<String>,
+
+        /// Suppress informational warnings (e.g., UTF-8 fallback messages)
+        #[arg(long, short = 'q')]
+        quiet: bool,
     },
 }
 

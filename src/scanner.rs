@@ -356,12 +356,12 @@ fn parse_ports(port_range: &Option<String>) -> Vec<models::Port> {
     let range = match port_range {
         Some(r) => r,
         None => {
-            // Default: common service ports
+            // Default: all TCP ports
             return vec![models::Port {
                 protocol: Some(models::Protocol::TCP),
                 range: vec![models::PortRange {
                     start: 1,
-                    end: Some(1024),
+                    end: Some(65535),
                 }],
             }];
         }
