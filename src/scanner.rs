@@ -355,7 +355,16 @@ fn expand_targets(target: &str) -> Result<Vec<String>, CynError> {
 fn parse_ports(port_range: &Option<String>) -> Vec<models::Port> {
     let range = match port_range {
         Some(r) => r,
-        None => return vec![],
+        None => {
+            // Default: common service ports
+            return vec![models::Port {
+                protocol: Some(models::Protocol::TCP),
+                range: vec![models::PortRange {
+                    start: 1,
+                    end: Some(1024),
+                }],
+            }];
+        }
     };
 
     let ranges: Vec<models::PortRange> = range
