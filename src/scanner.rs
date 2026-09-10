@@ -18,6 +18,10 @@ use scannerlib::storage::inmemory::InMemoryStorage;
 use scannerlib::storage::items::nvt::Feed;
 use scannerlib::storage::{Remover, Retriever, ScanID};
 
+/// synscan.nasl requires raw sockets (CAP_NET_RAW). We exclude it so the
+/// TCP-connect scanner (`openvas_tcp_scanner.nasl`) handles port scanning instead.
+const SYNSCAN_NASL_OID: &str = "1.3.6.1.4.1.25623.1.0.11219";
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Finding {
     pub host: String,
@@ -275,6 +279,11 @@ fn build_scan_model(
         .map(|list| list.to_vec())
         .unwrap_or_default();
 
+    let vts: Vec<models::VT> = vts
+        .into_iter()
+        .filter(|vt| vt.oid != SYNSCAN_NASL_OID)
+        .collect();
+
     Ok(models::Scan {
         scan_id: format!(
             "cyn-{}",
@@ -287,7 +296,7 @@ fn build_scan_model(
             hosts,
             ports,
             excluded_hosts: excluded,
-            alive_test_methods: vec![models::AliveTestMethods::Icmp],
+            alive_test_methods: vec![models::AliveTestMethods::ConsiderAlive],
             credentials: vec![],
             reverse_lookup_only: None,
             reverse_lookup_unify: None,
@@ -395,7 +404,7 @@ mod tests {
             vt_oids: None,
             exclude_hosts: None,
         };
-        let scan = build_scan_model(req, vec![]).unwrap();
+        let scan = build_scan_model(&req, vec![]).unwrap();
         assert_eq!(scan.target.hosts, vec!["192.168.1.1"]);
         assert!(scan.vts.is_empty());
     }
@@ -410,7 +419,7 @@ mod tests {
             vt_oids: None,
             exclude_hosts: Some(vec!["10.0.0.3".into()]),
         };
-        let scan = build_scan_model(req, vec![]).unwrap();
+        let scan = build_scan_model(&req, vec![]).unwrap();
         assert_eq!(scan.target.hosts.len(), 2);
         assert_eq!(scan.target.excluded_hosts, vec!["10.0.0.3"]);
         assert!(!scan.target.ports.is_empty());
@@ -426,7 +435,7 @@ mod tests {
             vt_oids: None,
             exclude_hosts: None,
         };
-        assert!(build_scan_model(req, vec![]).is_err());
+        assert!(build_scan_model(&req, vec![]).is_err());
     }
 
     #[test]
