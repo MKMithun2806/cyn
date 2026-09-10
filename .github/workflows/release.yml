@@ -1,0 +1,186 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version-check:
+    name: Check version change
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.check.outputs.should_release }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check if tag exists
+        id: check
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="v${VERSION}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists — skipping release"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Tag $TAG not found — will release"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: version-check
+    if: needs.version-check.outputs.should_release == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            use-cross: false
+            archive: tar.gz
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            use-cross: true
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            use-cross: false
+            archive: zip
+          - target: aarch64-apple-darwin
+            os: macos-14
+            use-cross: false
+            archive: tar.gz
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        if: matrix.use-cross && matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            libpcap-dev \
+            libsnmp-dev \
+            libssl-dev \
+            llvm-dev \
+            libclang-dev \
+            clang \
+            libssh2-1-dev \
+            zlib1g-dev
+          cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Install system dependencies (Linux native)
+        if: "!matrix.use-cross && runner.os == 'Linux'"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            libpcap-dev \
+            libsnmp-dev \
+            libssl-dev \
+            llvm-dev \
+            libclang-dev \
+            clang \
+            libssh2-1-dev \
+            zlib1g-dev \
+            musl-tools
+
+      - name: Build with cross (Linux arm64 musl)
+        if: matrix.use-cross
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Build with cargo (native)
+        if: "!matrix.use-cross"
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          BINARY="target/${{ matrix.target }}/release/cyn"
+          VERSION="${{ needs.version-check.outputs.version }}"
+          ARCHIVE_NAME="cyn-${VERSION}-${{ matrix.target }}"
+
+          if [ "${{ matrix.archive }}" = "tar.gz" ]; then
+            tar czf "${ARCHIVE_NAME}.tar.gz" -C "$(dirname $BINARY)" "$(basename $BINARY)"
+            echo "ASSET=${ARCHIVE_NAME}.tar.gz" >> "$GITHUB_ENV"
+          else
+            zip "${ARCHIVE_NAME}.zip" "$BINARY"
+            echo "ASSET=${ARCHIVE_NAME}.zip" >> "$GITHUB_ENV"
+          fi
+
+          # Generate checksum
+          if command -v sha256sum &> /dev/null; then
+            sha256sum "$ASSET" > "${ASSET}.sha256"
+          else
+            shasum -a 256 "$ASSET" > "${ASSET}.sha256"
+          fi
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binary = "target/${{ matrix.target }}/release/cyn.exe"
+          $version = "${{ needs.version-check.outputs.version }}"
+          $archiveName = "cyn-${version}-${{ matrix.target }}.zip"
+          Compress-Archive -Path $binary -DestinationPath $archiveName
+          $hash = (Get-FileHash -Algorithm SHA256 $archiveName).Hash.ToLower()
+          Set-Content -Path "${archiveName}.sha256" -Value "$hash  $archiveName"
+          echo "ASSET=$archiveName" >> $env:GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cyn-${{ matrix.target }}
+          path: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256
+
+  release:
+    name: Create release
+    needs: [version-check, build]
+    if: needs.version-check.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.version-check.outputs.version }}
+          name: v${{ needs.version-check.outputs.version }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: artifacts/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
