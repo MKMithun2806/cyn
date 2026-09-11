@@ -31,6 +31,11 @@ pub enum CynError {
     Json(#[from] serde_json::Error),
 
     #[error("{0}")]
-    #[allow(dead_code)]
     Other(String),
+}
+
+impl From<String> for CynError {
+    fn from(s: String) -> Self {
+        CynError::Other(s)
+    }
 }
