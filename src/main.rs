@@ -4,6 +4,7 @@ mod error;
 mod feed;
 mod nmap;
 mod output;
+mod report;
 mod scanner;
 
 use clap::Parser;
@@ -79,6 +80,8 @@ async fn run(cli: Cli) -> Result<(), error::CynError> {
             nmap,
             exclude,
             quiet: _,
+            report,
+            report_format,
         } => {
             output::print_scan_start(&target);
 
@@ -125,6 +128,29 @@ async fn run(cli: Cli) -> Result<(), error::CynError> {
 
             output::print_scan_complete(findings.len());
             output::output_findings(&findings, format)?;
+
+            // Generate report file if requested
+            if let Some(ref report_path) = report {
+                let fmt = match report_format {
+                    cli::ReportFormat::Csv => "csv",
+                    _ => "json",
+                };
+                report::write_report(&findings, fmt, Some(report_path))?;
+            }
+
+            Ok(())
+        }
+        Command::Report {
+            findings,
+            format,
+            output,
+        } => {
+            let findings = report::load_findings(&findings)?;
+            let fmt = match format {
+                cli::ReportFormat::Csv => "csv",
+                _ => "json",
+            };
+            report::write_report(&findings, fmt, output.as_deref())?;
             Ok(())
         }
     }
