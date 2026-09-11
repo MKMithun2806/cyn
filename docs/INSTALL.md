@@ -5,6 +5,7 @@
 - **Rust** 1.75+ (via [rustup](https://rustup.rs/))
 - **OpenVAS submodule** (included in this repo)
 - System libraries (see below)
+- **nmap** (optional, for port discovery import)
 
 ### Alpine Linux
 
@@ -31,6 +32,18 @@ sudo dnf install -y \
   libpcap-devel net-snmp-devel openssl-devel \
   libssh2-devel zlib-devel
 ```
+
+## Pre-built binaries
+
+Check the [Releases](https://github.com/MKMithun2806/cyn/releases) page
+for pre-built binaries:
+
+| Target | Archive |
+|--------|---------|
+| Linux amd64 (musl) | `cyn-<version>-x86_64-unknown-linux-musl.tar.gz` |
+| Linux arm64 (musl) | `cyn-<version>-aarch64-unknown-linux-musl.tar.gz` |
+| Windows amd64 | `cyn-<version>-x86_64-pc-windows-msvc.zip` |
+| macOS ARM | `cyn-<version>-aarch64-apple-darwin.tar.gz` |
 
 ## Build from source
 
@@ -62,4 +75,21 @@ cyn feed status
 ```sh
 cyn --help
 cyn feed status
+```
+
+## Nmap integration (optional)
+
+For targeted scans, use nmap to discover ports first:
+
+```sh
+# Install nmap (if not already installed)
+sudo apt-get install nmap    # Debian/Ubuntu
+sudo apk add nmap            # Alpine
+sudo dnf install nmap        # Fedora
+
+# Discover ports
+nmap -sV -oX scan.xml 192.168.1.1
+
+# Feed into Cyn
+cyn scan 192.168.1.1 --nmap scan.xml
 ```

@@ -21,8 +21,15 @@ the scanner directly.
             Modified OpenVAS
               scan engine
                      |
+           +---------+---------+
+           |                   |
+      TCP connect         Nmap import
+      scanner             (XML parser)
+           |                   |
+           +---------+---------+
+                     |
                      v
-               raw results
+              raw results
                      |
                      v
               Rust parser
@@ -31,6 +38,37 @@ the scanner directly.
               |             |
           terminal         JSON
 ```
+
+## Port Scanning
+
+Cyn uses two methods for port discovery:
+
+### 1. Built-in TCP connect scanner
+
+The `openvas_tcp_scanner.nasl` VT performs TCP connect scans using
+`tokio::net::TcpStream::connect()`. This requires **no raw sockets**
+(no `CAP_NET_RAW`, no root). It completes the full TCP handshake,
+grabs banners, and measures RTT statistics.
+
+The raw SYN scanner (`synscan.nasl`) is excluded because it requires
+`CAP_NET_RAW` via libpcap. The TCP connect scanner is more compatible
+and provides richer results (banners, RTT stats, port state classification).
+
+### 2. Nmap XML import
+
+Users can run nmap separately for port discovery and feed the results
+into Cyn via `--nmap scan.xml`. The `nmap` module parses nmap's `-oX`
+XML output and extracts open TCP ports.
+
+```
+nmap -sV -oX scan.xml 192.168.1.1
+cyn scan 192.168.1.1 --nmap scan.xml
+```
+
+### Default behavior
+
+When neither `--ports` nor `--nmap` is specified, Cyn scans all 65535
+TCP ports with a warning suggesting the user narrow the range.
 
 ## OpenVAS Source Reconnaissance
 
@@ -92,6 +130,16 @@ HOSTS_COUNT, HOSTS_EXCLUDED
 - `scannerlib::scheduling::Scheduler` - VT execution ordering
 - `scannerlib::nasl::syntax::Loader` - NASL script loading
 - `scannerlib::models` - Scan, Result, VT data types
+
+### Cyn Modules
+
+- `cli` - Command-line interface (clap)
+- `config` - Feed path resolution
+- `feed` - Feed status and update
+- `nmap` - Nmap XML import parser
+- `scanner` - Scan orchestration, VT loading, result collection
+- `output` - Terminal and JSON formatting
+- `error` - Error types
 
 ### Upstream Revision
 
