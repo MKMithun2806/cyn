@@ -60,6 +60,28 @@ pub enum Command {
         /// Suppress informational warnings (e.g., UTF-8 fallback messages)
         #[arg(long, short = 'q')]
         quiet: bool,
+
+        /// Generate a report file after scanning
+        #[arg(long, short = 'r')]
+        report: Option<PathBuf>,
+
+        /// Report format (used with --report)
+        #[arg(long, value_enum, default_value = "json")]
+        report_format: ReportFormat,
+    },
+
+    /// Generate a report from a previous scan's findings
+    Report {
+        /// Path to the JSON findings file from a previous scan
+        findings: PathBuf,
+
+        /// Output report format
+        #[arg(long, short = 'f', value_enum, default_value = "json")]
+        format: ReportFormat,
+
+        /// Output file path (default: stdout)
+        #[arg(long, short = 'o')]
+        output: Option<PathBuf>,
     },
 }
 
@@ -84,9 +106,16 @@ pub enum FeedCommand {
     },
 }
 
-#[derive(clap::ValueEnum, Clone, Copy, Debug, Default)]
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq)]
 pub enum OutputFormat {
     #[default]
     Terminal,
     Json,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq)]
+pub enum ReportFormat {
+    #[default]
+    Json,
+    Csv,
 }
