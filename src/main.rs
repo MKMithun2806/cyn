@@ -12,6 +12,11 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() {
+    // Force ring as the process-wide Rustls crypto provider.
+    // Multiple dependencies (reqwest, sqlx) pull in different providers;
+    // installing one explicitly prevents the "no crypto provider" panic.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cli = Cli::parse();
 
     let quiet = matches!(&cli.command, Command::Scan { quiet, .. } if *quiet);

@@ -22,6 +22,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "fs
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 quick-xml = "0.37"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
 [dev-dependencies]
 tempfile = "3"
