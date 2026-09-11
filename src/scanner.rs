@@ -96,13 +96,7 @@ pub async fn run_scan(config: &Config, request: &ScanRequest) -> Result<Vec<Find
     );
 
     let runner: ScanRunner<Arc<InMemoryStorage>> = ScanRunner::new(
-        &storage,
-        &loader,
-        &executor,
-        schedule,
-        &scan,
-        &None,
-        rx_target,
+        &storage, &loader, &executor, schedule, &scan, &None, rx_target,
     )
     .map_err(|e| CynError::Scanner(format!("failed to create scan runner: {e}")))?;
 
@@ -153,14 +147,14 @@ async fn build_vt_metadata_map(
     results: &[models::Result],
 ) -> std::collections::HashMap<String, models::VTData> {
     use std::collections::HashSet;
-    let oids: HashSet<&str> = results
-        .iter()
-        .filter_map(|r| r.oid.as_deref())
-        .collect();
+    let oids: HashSet<&str> = results.iter().filter_map(|r| r.oid.as_deref()).collect();
 
     let mut map = std::collections::HashMap::new();
     for oid in oids {
-        if let Ok(Some(vt_data)) = storage.retrieve(&scannerlib::storage::items::nvt::Oid(oid.to_string())).await {
+        if let Ok(Some(vt_data)) = storage
+            .retrieve(&scannerlib::storage::items::nvt::Oid(oid.to_string()))
+            .await
+        {
             map.insert(oid.to_string(), vt_data);
         }
     }
@@ -227,17 +221,18 @@ fn result_to_finding(
                 .tag
                 .get(&models::TagKey::CvssBase)
                 .and_then(|v| v.to_string().parse().ok());
-            let solution = vt
-                .tag
-                .get(&models::TagKey::Solution)
-                .map(|v| v.to_string());
+            let solution = vt.tag.get(&models::TagKey::Solution).map(|v| v.to_string());
             let cves: Vec<String> = vt
                 .references
                 .iter()
                 .filter(|r| r.class == "cve")
                 .map(|r| r.id.clone())
                 .collect();
-            let refs: Vec<String> = vt.references.iter().map(|r| format!("{}: {}", r.class, r.id)).collect();
+            let refs: Vec<String> = vt
+                .references
+                .iter()
+                .map(|r| format!("{}: {}", r.class, r.id))
+                .collect();
             (name, severity, solution, refs, cves)
         } else {
             (String::new(), None, None, vec![], vec![])
@@ -261,10 +256,7 @@ fn result_to_finding(
     })
 }
 
-fn build_scan_model(
-    request: &ScanRequest,
-    vts: Vec<models::VT>,
-) -> Result<models::Scan, CynError> {
+fn build_scan_model(request: &ScanRequest, vts: Vec<models::VT>) -> Result<models::Scan, CynError> {
     let hosts = expand_targets(&request.target)?;
 
     if hosts.is_empty() {

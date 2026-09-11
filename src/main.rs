@@ -89,8 +89,8 @@ async fn run(cli: Cli) -> Result<(), error::CynError> {
 
             // Resolve ports: nmap file takes precedence, then --ports, then default all-ports
             let port_range = if let Some(ref nmap_path) = nmap {
-                let scan = nmap::NmapScan::from_file(nmap_path)
-                    .map_err(error::CynError::Scanner)?;
+                let scan =
+                    nmap::NmapScan::from_file(nmap_path).map_err(error::CynError::Scanner)?;
                 let ports = scan.open_tcp_ports();
                 if ports.is_empty() {
                     return Err(error::CynError::Scanner(
@@ -102,7 +102,13 @@ async fn run(cli: Cli) -> Result<(), error::CynError> {
                     ports.len(),
                     nmap_path.display()
                 );
-                Some(ports.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(","))
+                Some(
+                    ports
+                        .iter()
+                        .map(|p| p.to_string())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                )
             } else if ports.is_some() {
                 ports
             } else {

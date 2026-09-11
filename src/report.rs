@@ -10,7 +10,11 @@ pub fn generate_json(findings: &[Finding]) -> String {
 
 pub fn generate_csv(findings: &[Finding]) -> String {
     let mut w = Vec::new();
-    writeln!(w, "host,port,protocol,oid,name,severity,cves,solution,references,result_type").unwrap();
+    writeln!(
+        w,
+        "host,port,protocol,oid,name,severity,cves,solution,references,result_type"
+    )
+    .unwrap();
 
     for f in findings {
         let port = f.port.map(|p| p.to_string()).unwrap_or_default();
@@ -33,7 +37,11 @@ pub fn generate_csv(findings: &[Finding]) -> String {
     String::from_utf8(w).unwrap_or_default()
 }
 
-pub fn write_report(findings: &[Finding], format: &str, output: Option<&Path>) -> Result<(), String> {
+pub fn write_report(
+    findings: &[Finding],
+    format: &str,
+    output: Option<&Path>,
+) -> Result<(), String> {
     let content = match format {
         "csv" => generate_csv(findings),
         _ => generate_json(findings),
@@ -57,8 +65,7 @@ pub fn write_report(findings: &[Finding], format: &str, output: Option<&Path>) -
 pub fn load_findings(path: &Path) -> Result<Vec<Finding>, String> {
     let content = fs::read_to_string(path)
         .map_err(|e| format!("failed to read findings file {}: {e}", path.display()))?;
-    serde_json::from_str(&content)
-        .map_err(|e| format!("failed to parse findings JSON: {e}"))
+    serde_json::from_str(&content).map_err(|e| format!("failed to parse findings JSON: {e}"))
 }
 
 #[cfg(test)]
