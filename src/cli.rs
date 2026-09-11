@@ -70,8 +70,8 @@ pub enum Command {
         report_format: ReportFormat,
     },
 
-    /// Generate a report from a previous scan's findings
-    Report {
+    /// Convert a previous scan's findings to a different format
+    Convert {
         /// Path to the JSON findings file from a previous scan
         findings: PathBuf,
 

@@ -140,7 +140,7 @@ async fn run(cli: Cli) -> Result<(), error::CynError> {
 
             Ok(())
         }
-        Command::Report {
+        Command::Convert {
             findings,
             format,
             output,
