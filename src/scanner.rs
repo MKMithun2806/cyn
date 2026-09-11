@@ -46,7 +46,7 @@ pub struct ScanRequest {
     pub exclude_hosts: Option<Vec<String>>,
 }
 
-pub async fn run_scan(config: &Config, request: &ScanRequest) -> Result<Vec<Finding>, CynError> {
+pub async fn run_scan(config: &Config, request: &ScanRequest, open_ports: &[u16]) -> Result<Vec<Finding>, CynError> {
     let feed_path = &config.feed_path;
 
     if !feed_path.exists() {
@@ -58,6 +58,7 @@ pub async fn run_scan(config: &Config, request: &ScanRequest) -> Result<Vec<Find
     let storage = Arc::new(InMemoryStorage::new());
     let loader = Loader::from_feed_path(feed_path);
 
+    eprintln!("  [1/6] Loading feed metadata...");
     let verifier = HashSumNameLoader::sha256(&loader)
         .map_err(|e| CynError::Scanner(format!("failed to create feed verifier: {e}")))?;
     let updater = Update::init("cyn", 5, loader.clone(), &storage, verifier);
@@ -65,12 +66,16 @@ pub async fn run_scan(config: &Config, request: &ScanRequest) -> Result<Vec<Find
         .perform_update()
         .await
         .map_err(|e| CynError::Scanner(format!("feed update failed: {e}")))?;
+    eprintln!("  [1/6] Feed metadata loaded");
 
-    let vts = load_vts(&storage, request).await?;
+    eprintln!("  [2/6] Loading VT list...");
+    let vts = load_vts(&storage, request, open_ports).await?;
+    eprintln!("  [2/6] {} VTs loaded", vts.len());
 
     let models_scan = build_scan_model(request, vts)?;
     let scan_id = models_scan.scan_id.clone();
     let scan = Scan::default_to_localhost(models_scan);
+    eprintln!("  [3/6] Scan model built: {} host(s), {} VT(s)", scan.targets.len(), scan.vts.len());
 
     let capacity = scan.targets.len().max(1);
     let (tx_target, rx_target) = mpsc::channel::<Target>(capacity);
@@ -82,12 +87,15 @@ pub async fn run_scan(config: &Config, request: &ScanRequest) -> Result<Vec<Find
     }
     drop(tx_target);
 
+    eprintln!("  [5/6] Creating scan runner...");
     let executor = nasl_std_executor();
     let scheduler = Scheduler::new(storage.clone());
+    eprintln!("  [4/6] Building execution plan...");
     let schedule = scheduler
         .execution_plan(&scan.vts)
         .await
         .map_err(|e| CynError::Scanner(format!("scheduling failed: {e}")))?;
+    eprintln!("  [4/6] Execution plan ready");
 
     tracing::info!(
         "scan started: {} target(s), {} VTs",
@@ -100,17 +108,26 @@ pub async fn run_scan(config: &Config, request: &ScanRequest) -> Result<Vec<Find
     )
     .map_err(|e| CynError::Scanner(format!("failed to create scan runner: {e}")))?;
 
+    eprintln!("  [6/6] Executing scan...");
+    let mut succeeded = 0u32;
+    let mut failed = 0u32;
+    let mut errors = 0u32;
+
     let mut stream = Box::pin(runner.stream());
+    let mut total_results = 0u32;
     while let Some(result) = stream.next().await {
+        total_results += 1;
         match result {
             Ok(script_result) => {
                 if script_result.has_succeeded() {
+                    succeeded += 1;
                     tracing::debug!(
                         oid = %script_result.oid,
                         stage = ?script_result.stage,
                         "script succeeded"
                     );
                 } else {
+                    failed += 1;
                     tracing::debug!(
                         oid = %script_result.oid,
                         stage = ?script_result.stage,
@@ -119,10 +136,17 @@ pub async fn run_scan(config: &Config, request: &ScanRequest) -> Result<Vec<Find
                 }
             }
             Err(e) => {
+                errors += 1;
                 tracing::warn!(error = %e, "script execution error");
             }
         }
     }
+
+    tracing::info!(
+        "scan execution complete: succeeded={succeeded}, failed={failed}, errors={errors}, total_stream_results={total_results}"
+    );
+
+    eprintln!("  [done] Results: succeeded={succeeded}, failed={failed}, errors={errors}");
 
     let results = storage
         .remove(&ScanID(scan_id))
@@ -130,14 +154,28 @@ pub async fn run_scan(config: &Config, request: &ScanRequest) -> Result<Vec<Find
         .map_err(|e| CynError::Scanner(format!("failed to retrieve results: {e}")))?;
 
     let raw_results = results.unwrap_or_default();
+    eprintln!("  [done] Raw results from storage: {}", raw_results.len());
+
+    // Log result types
+    use std::collections::HashMap;
+    let mut type_counts: HashMap<String, u32> = HashMap::new();
+    for r in &raw_results {
+        let key = format!("{:?}", r.r_type);
+        *type_counts.entry(key).or_insert(0) += 1;
+    }
+    for (typ, count) in &type_counts {
+        tracing::info!("  result type {typ}: {count}");
+    }
 
     // Pre-fetch VT metadata for all OIDs found in results
     let vt_metadata = build_vt_metadata_map(&storage, &raw_results).await;
 
-    let findings = raw_results
+    let findings: Vec<Finding> = raw_results
         .into_iter()
         .filter_map(|r| result_to_finding(r, &vt_metadata))
         .collect();
+
+    tracing::info!("findings after conversion: {}", findings.len());
 
     Ok(findings)
 }
@@ -164,6 +202,7 @@ async fn build_vt_metadata_map(
 async fn load_vts(
     storage: &InMemoryStorage,
     request: &ScanRequest,
+    open_ports: &[u16],
 ) -> Result<Vec<models::VT>, CynError> {
     match &request.vt_oids {
         Some(oids) if !oids.is_empty() => Ok(oids
@@ -181,14 +220,99 @@ async fn load_vts(
 
             match all_vts {
                 Some(vts) => {
-                    tracing::info!("loaded {} VTs from feed", vts.len());
-                    Ok(vts
+                    let open_port_set: std::collections::HashSet<String> = open_ports
                         .iter()
+                        .map(|p| p.to_string())
+                        .collect();
+
+                    let mut kept = 0u32;
+                    let mut skipped_port = 0u32;
+                    let mut skipped_family = 0u32;
+
+                    let filtered: Vec<models::VT> = vts
+                        .iter()
+                        .filter(|vt| {
+                            // Look up VT metadata to check required_ports and family
+                            let vt_data = futures::executor::block_on(async {
+                                storage
+                                    .retrieve(&scannerlib::storage::items::nvt::Oid(vt.oid.clone()))
+                                    .await
+                            });
+                            match vt_data {
+                                Ok(Some(data)) => {
+                                    // Skip deprecated/attic VTs
+                                    if data.family == "attic" {
+                                        skipped_family += 1;
+                                        return false;
+                                    }
+                                    // Skip OS-specific families for systems we're not targeting
+                                    let skip_families = [
+                                        "Windows",
+                                        "Windows : Microsoft Bulletins",
+                                        "WindowsLocalChecks",
+                                        "WindowsRemoteChecks",
+                                        "Gain a shell remotely",
+                                        "Huawei",
+                                        "JunOS",
+                                        "Solaris",
+                                        "macOS Local Security Checks",
+                                        "Fedora Local Security Checks",
+                                        "CentOS Local Security Checks",
+                                        "Red Hat Local Security Checks",
+                                        "SuSE Local Security Checks",
+                                        "Ubuntu Local Security Checks",
+                                        "Debian Local Security Checks",
+                                        "Mandriva Local Security Checks",
+                                    ];
+                                    if skip_families.contains(&data.family.as_str()) {
+                                        skipped_family += 1;
+                                        return false;
+                                    }
+                                    // If VT has no port requirements, keep it
+                                    if data.required_ports.is_empty() && data.required_udp_ports.is_empty()
+                                    {
+                                        kept += 1;
+                                        return true;
+                                    }
+                                    // Check if any required port matches open ports
+                                    let matches = data.required_ports.iter().any(|rp| {
+                                        // Format is "port/tcp" or just "port"
+                                        let port_num = rp.split('/').next().unwrap_or(rp);
+                                        open_port_set.contains(port_num)
+                                    });
+                                    if matches {
+                                        kept += 1;
+                                        true
+                                    } else {
+                                        skipped_port += 1;
+                                        false
+                                    }
+                                }
+                                _ => {
+                                    // Can't look up metadata, keep VT (safe default)
+                                    true
+                                }
+                            }
+                        })
                         .map(|vt| models::VT {
                             oid: vt.oid.clone(),
                             parameters: vec![],
                         })
-                        .collect())
+                        .collect();
+
+                    eprintln!(
+                        "  filter: {} kept, {} skipped (port mismatch), {} skipped (irrelevant family)",
+                        kept, skipped_port, skipped_family
+                    );
+                    tracing::info!(
+                        "filtered {} VTs to {} (kept={}, port_skip={}, family_skip={})",
+                        vts.len(),
+                        filtered.len(),
+                        kept,
+                        skipped_port,
+                        skipped_family
+                    );
+                    Ok(filtered)
                 }
                 None => Ok(vec![]),
             }

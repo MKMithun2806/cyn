@@ -88,7 +88,7 @@ async fn run(cli: Cli) -> Result<(), error::CynError> {
             let vt_oids = vt.map(|v| v.split(',').map(|s| s.trim().to_string()).collect());
 
             // Resolve ports: nmap file takes precedence, then --ports, then default all-ports
-            let port_range = if let Some(ref nmap_path) = nmap {
+            let (port_range, open_ports) = if let Some(ref nmap_path) = nmap {
                 let scan =
                     nmap::NmapScan::from_file(nmap_path).map_err(error::CynError::Scanner)?;
                 let ports = scan.open_tcp_ports();
@@ -102,18 +102,20 @@ async fn run(cli: Cli) -> Result<(), error::CynError> {
                     ports.len(),
                     nmap_path.display()
                 );
-                Some(
-                    ports
-                        .iter()
-                        .map(|p| p.to_string())
-                        .collect::<Vec<_>>()
-                        .join(","),
-                )
-            } else if ports.is_some() {
-                ports
+                let port_str = ports
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                (Some(port_str), ports)
+            } else if let Some(ref port_str) = ports {
+                // Parse port ranges into individual port numbers
+                let parsed = parse_port_range(port_str);
+                (ports.clone(), parsed)
             } else {
                 eprintln!("warning: no --ports or --nmap specified, scanning all 65535 TCP ports (use --ports or --nmap to narrow)");
-                Some("1-65535".into())
+                // For all-ports, we can't enumerate 65535; pass empty to skip filtering
+                (Some("1-65535".into()), vec![])
             };
 
             let request = scanner::ScanRequest {
@@ -130,7 +132,7 @@ async fn run(cli: Cli) -> Result<(), error::CynError> {
                 }),
             };
 
-            let findings = scanner::run_scan(&config, &request).await?;
+            let findings = scanner::run_scan(&config, &request, &open_ports).await?;
 
             output::print_scan_complete(findings.len());
             output::output_findings(&findings, format)?;
@@ -160,4 +162,21 @@ async fn run(cli: Cli) -> Result<(), error::CynError> {
             Ok(())
         }
     }
+}
+
+fn parse_port_range(range: &str) -> Vec<u16> {
+    let mut ports = Vec::new();
+    for part in range.split(',') {
+        let part = part.trim();
+        if let Some((start_str, end_str)) = part.split_once('-') {
+            if let (Ok(start), Ok(end)) = (start_str.parse::<u16>(), end_str.parse::<u16>()) {
+                for p in start..=end {
+                    ports.push(p);
+                }
+            }
+        } else if let Ok(p) = part.parse::<u16>() {
+            ports.push(p);
+        }
+    }
+    ports
 }
