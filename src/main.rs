@@ -8,6 +8,7 @@ mod nmap;
 mod output;
 mod report;
 mod scanner;
+mod selection;
 
 use clap::Parser;
 use cli::{Cli, Command, FeedCommand};
@@ -148,6 +149,7 @@ async fn run(cli: Cli) -> Result<(), error::CynError> {
                         .filter(|s| !s.is_empty())
                         .collect()
                 }),
+                discovery: Some(discovery),
             };
 
             let findings = scanner::run_scan(&config, &request, &open_ports).await?;

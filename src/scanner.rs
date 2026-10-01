@@ -5,7 +5,9 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 
 use crate::config::Config;
+use crate::discovery::DiscoveryResult;
 use crate::error::CynError;
+use crate::selection::{select_vts, SelectionContext};
 
 use scannerlib::feed::{HashSumNameLoader, Update};
 use scannerlib::models;
@@ -44,12 +46,13 @@ pub struct ScanRequest {
     pub port_range: Option<String>,
     pub vt_oids: Option<Vec<String>>,
     pub exclude_hosts: Option<Vec<String>>,
+    pub discovery: Option<DiscoveryResult>,
 }
 
 pub async fn run_scan(
     config: &Config,
     request: &ScanRequest,
-    open_ports: &[u16],
+    _open_ports: &[u16],
 ) -> Result<Vec<Finding>, CynError> {
     let feed_path = &config.feed_path;
 
@@ -73,7 +76,7 @@ pub async fn run_scan(
     eprintln!("Feed ready.");
 
     eprintln!("Selecting vulnerability checks...");
-    let vts = load_vts(&storage, request, open_ports).await?;
+    let vts = load_vts(&storage, request, _open_ports).await?;
     eprintln!("Selected {} vulnerability checks.", vts.len());
 
     let models_scan = build_scan_model(request, vts)?;
@@ -231,92 +234,33 @@ async fn load_vts(
 
             match all_vts {
                 Some(vts) => {
-                    let open_port_set: std::collections::HashSet<String> =
-                        open_ports.iter().map(|p| p.to_string()).collect();
-
-                    let mut kept = 0u32;
-                    let mut skipped_port = 0u32;
-                    let mut skipped_family = 0u32;
-
-                    let filtered: Vec<models::VT> = vts
+                    let metadata = vts
                         .iter()
-                        .filter(|vt| {
-                            // Look up VT metadata to check required_ports and family
-                            let vt_data = futures::executor::block_on(async {
-                                storage
-                                    .retrieve(&scannerlib::storage::items::nvt::Oid(vt.oid.clone()))
-                                    .await
-                            });
-                            match vt_data {
-                                Ok(Some(data)) => {
-                                    // Skip deprecated/attic VTs
-                                    if data.family == "attic" {
-                                        skipped_family += 1;
-                                        return false;
-                                    }
-                                    // Skip OS-specific families for systems we're not targeting
-                                    let skip_families = [
-                                        "Windows",
-                                        "Windows : Microsoft Bulletins",
-                                        "WindowsLocalChecks",
-                                        "WindowsRemoteChecks",
-                                        "Gain a shell remotely",
-                                        "Huawei",
-                                        "JunOS",
-                                        "Solaris",
-                                        "macOS Local Security Checks",
-                                        "Fedora Local Security Checks",
-                                        "CentOS Local Security Checks",
-                                        "Red Hat Local Security Checks",
-                                        "SuSE Local Security Checks",
-                                        "Ubuntu Local Security Checks",
-                                        "Debian Local Security Checks",
-                                        "Mandriva Local Security Checks",
-                                    ];
-                                    if skip_families.contains(&data.family.as_str()) {
-                                        skipped_family += 1;
-                                        return false;
-                                    }
-                                    // If VT has no port requirements, keep it
-                                    if data.required_ports.is_empty()
-                                        && data.required_udp_ports.is_empty()
-                                    {
-                                        kept += 1;
-                                        return true;
-                                    }
-                                    // Check if any required port matches open ports
-                                    let matches = data.required_ports.iter().any(|rp| {
-                                        // Format is "port/tcp" or just "port"
-                                        let port_num = rp.split('/').next().unwrap_or(rp);
-                                        open_port_set.contains(port_num)
-                                    });
-                                    if matches {
-                                        kept += 1;
-                                        true
-                                    } else {
-                                        skipped_port += 1;
-                                        false
-                                    }
-                                }
-                                _ => {
-                                    // Can't look up metadata, keep VT (safe default)
-                                    true
-                                }
-                            }
-                        })
-                        .map(|vt| models::VT {
-                            oid: vt.oid.clone(),
+                        .map(|data| (data.oid.clone(), data.clone()))
+                        .collect::<std::collections::HashMap<_, _>>();
+                    let candidates = vts
+                        .iter()
+                        .map(|data| models::VT {
+                            oid: data.oid.clone(),
                             parameters: vec![],
                         })
-                        .collect();
+                        .collect::<Vec<_>>();
+                    let context = request
+                        .discovery
+                        .as_ref()
+                        .map(SelectionContext::from_discovery)
+                        .unwrap_or_else(|| SelectionContext::from_tcp_ports(open_ports));
+                    let (filtered, stats) = select_vts(&candidates, &metadata, &context);
 
                     tracing::info!(
-                        "filtered {} VTs to {} (kept={}, port_skip={}, family_skip={})",
-                        vts.len(),
+                        "filtered {} VTs to {} (kept={}, port_skip={}, family_skip={}, irrelevant_skip={}, dependencies={})",
+                        candidates.len(),
                         filtered.len(),
-                        kept,
-                        skipped_port,
-                        skipped_family
+                        stats.selected,
+                        stats.skipped_port,
+                        stats.skipped_family,
+                        stats.skipped_irrelevant,
+                        stats.added_dependencies,
                     );
                     Ok(filtered)
                 }
@@ -538,6 +482,7 @@ mod tests {
             port_range: None,
             vt_oids: None,
             exclude_hosts: None,
+            discovery: None,
         };
         let scan = build_scan_model(&req, vec![]).unwrap();
         assert_eq!(scan.target.hosts, vec!["192.168.1.1"]);
@@ -553,6 +498,7 @@ mod tests {
             port_range: Some("22,80-443".into()),
             vt_oids: None,
             exclude_hosts: Some(vec!["10.0.0.3".into()]),
+            discovery: None,
         };
         let scan = build_scan_model(&req, vec![]).unwrap();
         assert_eq!(scan.target.hosts.len(), 2);
@@ -569,6 +515,7 @@ mod tests {
             port_range: None,
             vt_oids: None,
             exclude_hosts: None,
+            discovery: None,
         };
         assert!(build_scan_model(&req, vec![]).is_err());
     }
