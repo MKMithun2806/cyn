@@ -12,6 +12,10 @@ pub struct Cli {
     #[arg(long, short = 'c', env = "CYN_CONFIG", global = true)]
     pub config: Option<PathBuf>,
 
+    /// Enable diagnostic logging
+    #[arg(long, short = 'v', global = true)]
+    pub verbose: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }

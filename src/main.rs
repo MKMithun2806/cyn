@@ -21,14 +21,14 @@ async fn main() {
     let cli = Cli::parse();
 
     let quiet = matches!(&cli.command, Command::Scan { quiet, .. } if *quiet);
+    let verbose = cli.verbose;
 
     // Scans can execute tens of thousands of VTs. Keep normal output focused on
-    // scan progress and findings; users can opt into the full diagnostic stream
-    // with RUST_LOG=info when investigating a scan.
-    let filter = if quiet {
+    // scan progress and findings; diagnostics require an explicit --verbose.
+    let filter = if quiet || !verbose {
         EnvFilter::new("error")
     } else {
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("error"))
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
     };
 
     tracing_subscriber::fmt()
