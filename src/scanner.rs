@@ -450,6 +450,10 @@ fn build_scan_model(request: &ScanRequest, vts: Vec<models::VT>) -> Result<model
                 id: "max_checks".into(),
                 value: request.max_checks.to_string(),
             },
+            models::ScanPreference {
+                id: "test_alive_hosts_only".into(),
+                value: "yes".into(),
+            },
         ],
     })
 }

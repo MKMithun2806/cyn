@@ -21,6 +21,8 @@ use thiserror::Error;
 
 use wave::WaveExecutionPlan;
 
+const TCP_SCANNER_OID: &str = "1.3.6.1.4.1.25623.1.0.10335";
+
 /// Error cases for VTFetcher
 #[derive(Error, Debug, Clone)]
 pub enum VTError {
@@ -173,10 +175,25 @@ where
         let mut unknown_dependencies = Vec::new();
         let mut known_dependencies = HashMap::new();
         let mut vts = vec![];
+        let tcp_scanner = self
+            .storage
+            .retrieve(&Oid(TCP_SCANNER_OID.to_string()))
+            .await?;
 
         // Collect all VT information
         for vt in scan_vts {
-            if let Some(nvt) = self.storage.retrieve(&Oid(vt.oid.clone())).await? {
+            if let Some(mut nvt) = self.storage.retrieve(&Oid(vt.oid.clone())).await? {
+                // Service detection consumes the Ports/tcp/* KB entries produced by
+                // the TCP scanner. The feed does not declare this dependency for
+                // every service VT, so enforce the ordering here; otherwise both
+                // can land in the same wave and execution order is nondeterministic.
+                if nvt.family == "Service detection"
+                    && nvt.oid != TCP_SCANNER_OID
+                    && let Some(scanner) = &tcp_scanner
+                    && !nvt.dependencies.contains(&scanner.filename)
+                {
+                    nvt.dependencies.push(scanner.filename.clone());
+                }
                 unknown_dependencies.extend(nvt.dependencies.clone());
                 vts.push((nvt, Some(vt.parameters.clone())));
             } else {
