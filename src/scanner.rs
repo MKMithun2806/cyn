@@ -54,6 +54,18 @@ pub struct Finding {
     pub source: Option<String>,
     #[serde(default)]
     pub confidence: Confidence,
+    #[serde(default)]
+    pub category: FindingCategory,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum FindingCategory {
+    Vulnerability,
+    Misconfiguration,
+    Exposure,
+    #[default]
+    Information,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -299,10 +311,10 @@ fn result_to_finding(
     vt_metadata: &std::collections::HashMap<String, models::VTData>,
     discovery: Option<&DiscoveryResult>,
 ) -> Option<Finding> {
-    let result_type = match result.r_type {
-        models::ResultType::Alarm => "Alarm",
-        models::ResultType::Log => "Log",
-        models::ResultType::Error => "Error",
+    let (result_type, category) = match result.r_type {
+        models::ResultType::Alarm => ("Alarm", FindingCategory::Vulnerability),
+        models::ResultType::Log => ("Log", FindingCategory::Information),
+        models::ResultType::Error => ("Error", FindingCategory::Information),
         models::ResultType::HostStart => return None,
         models::ResultType::HostEnd => return None,
         models::ResultType::DeadHost => return None,
@@ -442,6 +454,7 @@ fn result_to_finding(
         )),
         source: Some("OpenVAS VT feed".into()),
         confidence,
+        category,
     })
 }
 

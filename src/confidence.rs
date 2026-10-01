@@ -58,6 +58,11 @@ pub fn assess(result_type: &str, evidence: &[Evidence]) -> Confidence {
         ("cpe", 25, "A CPE was detected for the service"),
         ("banner", 10, "A protocol banner supports the detection"),
         ("header", 10, "Protocol headers support the detection"),
+        (
+            "missing-header",
+            15,
+            "A missing security header was directly observed",
+        ),
         ("result", 5, "The OpenVAS VT produced a result"),
     ] {
         if kinds.contains(kind) {

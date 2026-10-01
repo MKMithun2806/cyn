@@ -1,3 +1,4 @@
+mod checks;
 mod cli;
 mod confidence;
 mod config;
@@ -153,7 +154,10 @@ async fn run(cli: Cli) -> Result<(), error::CynError> {
                 discovery: Some(discovery),
             };
 
-            let findings = scanner::run_scan(&config, &request, &open_ports).await?;
+            let mut findings = scanner::run_scan(&config, &request, &open_ports).await?;
+            findings.extend(checks::run(
+                request.discovery.as_ref().expect("discovery attached"),
+            ));
 
             output::print_scan_complete(&findings);
             output::output_findings(&findings, format)?;
