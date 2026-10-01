@@ -529,6 +529,8 @@ async fn plugin_run_openvas_tcp_scanner(
     let target_ip = script_ctx.target().ip_addr();
     let port_range = script_ctx.target().ports_tcp().iter().cloned().collect();
 
+    debug!(target = %target_ip, ports = ?port_range, "starting TCP connect scan");
+
     let mut params = ctx.scan_params();
 
     let safe_checks = params
@@ -564,6 +566,13 @@ async fn plugin_run_openvas_tcp_scanner(
     // Create and run scanner
     let scanner = TcpScanner::new(config);
     let results = scanner.scan().await.unwrap();
+    debug!(
+        target = %target_ip,
+        open_ports = ?results.open_ports,
+        closed_ports = results.closed_ports.len(),
+        filtered_ports = results.filtered_ports.len(),
+        "TCP connect scan finished"
+    );
 
     // Store results in context
     script_ctx
