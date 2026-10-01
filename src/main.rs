@@ -28,7 +28,10 @@ async fn main() {
     let filter = if quiet || !verbose {
         EnvFilter::new("error")
     } else {
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+        // Keep verbose mode useful without re-enabling one warning per legacy
+        // Latin-1 feed file. Detailed feed/parser diagnostics remain available
+        // by changing the filter in code when specifically debugging the feed.
+        EnvFilter::new("error,cyn=info,scannerlib::nasl::builtin::find_service=info")
     };
 
     tracing_subscriber::fmt()
