@@ -94,7 +94,9 @@ async fn run(cli: Cli) -> Result<(), error::CynError> {
             report,
             report_format,
         } => {
-            output::print_scan_start(&target);
+            if format == cli::OutputFormat::Terminal {
+                output::print_scan_start(&target);
+            }
 
             let vt_oids = vt.map(|v| v.split(',').map(|s| s.trim().to_string()).collect());
 
@@ -159,7 +161,13 @@ async fn run(cli: Cli) -> Result<(), error::CynError> {
                 request.discovery.as_ref().expect("discovery attached"),
             ));
 
-            output::print_scan_complete(&findings);
+            if format == cli::OutputFormat::Terminal {
+                output::print_scan_complete(
+                    &target,
+                    request.discovery.as_ref().expect("discovery attached"),
+                    &findings,
+                );
+            }
             output::output_findings(&findings, format)?;
 
             // Generate report file if requested

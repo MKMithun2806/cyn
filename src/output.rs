@@ -1,7 +1,8 @@
 use crate::cli::OutputFormat;
+use crate::discovery::{DiscoveryResult, Protocol};
 use crate::error::CynError;
 use crate::feed::FeedInfo;
-use crate::scanner::Finding;
+use crate::scanner::{Finding, FindingCategory};
 use std::collections::HashSet;
 use std::fmt::Display;
 use std::io::{self, IsTerminal};
@@ -131,11 +132,7 @@ fn print_findings_terminal(findings: &[Finding]) -> Result<(), CynError> {
             })
             .unwrap_or_else(|| "N/A".into());
 
-        let marker = if f.result_type == "Error" {
-            style.red("!")
-        } else {
-            style.red("!")
-        };
+        let marker = style.red("!");
         println!(
             "│ {}. {} [{}] {}",
             i + 1,
@@ -148,6 +145,17 @@ fn print_findings_terminal(findings: &[Finding]) -> Result<(), CynError> {
             let proto = f.protocol.as_deref().unwrap_or("tcp");
             println!("│    {} {port}/{proto}", style.dim("Port:"));
         }
+        println!(
+            "│    {} {}",
+            style.dim("Category:"),
+            category_label(&f.category)
+        );
+        println!(
+            "│    {} {}% ({})",
+            style.dim("Confidence:"),
+            f.confidence.score,
+            confidence_label(&f.confidence.level)
+        );
         println!("│    {} {}", style.dim("OID:"), f.oid);
         if let Some(desc) = &f.description {
             println!("│    {} {desc}", style.dim("Summary:"));
@@ -188,9 +196,9 @@ pub fn print_scan_start(target: &str) {
     );
 }
 
-pub fn print_scan_complete(findings: &[Finding]) {
+pub fn print_scan_complete(target: &str, discovery: &DiscoveryResult, findings: &[Finding]) {
     let style = Style::terminal();
-    let vulnerabilities = findings
+    let alarms = findings
         .iter()
         .filter(|finding| finding.result_type == "Alarm")
         .count();
@@ -202,18 +210,139 @@ pub fn print_scan_complete(findings: &[Finding]) {
         .iter()
         .filter(|finding| finding.result_type == "Log")
         .count();
+    let critical = severity_count(findings, 9.0, f64::INFINITY);
+    let high = severity_count(findings, 7.0, 9.0);
+    let medium = severity_count(findings, 4.0, 7.0);
+    let low = severity_count(findings, 0.0, 4.0);
+    let misconfigurations = findings
+        .iter()
+        .filter(|finding| finding.category == FindingCategory::Misconfiguration)
+        .count();
+    let exposures = findings
+        .iter()
+        .filter(|finding| finding.category == FindingCategory::Exposure)
+        .count();
 
-    let status = if vulnerabilities > 0 || errors > 0 {
+    println!();
+    println!(
+        "╭─ {} ─────────────────────────────────────────╮",
+        style.bold("CYN SECURITY SCAN")
+    );
+    println!("│ {}", style.bold(target));
+    for host in &discovery.hosts {
+        let identity = host
+            .os
+            .as_deref()
+            .or(host.hostname.as_deref())
+            .unwrap_or("OS not identified");
+        println!("│ {} · {} service(s)", identity, host.services.len());
+    }
+    println!("╰───────────────────────────────────────────────╯");
+
+    println!();
+    println!("{}", style.bold("SEVERITY"));
+    println!(
+        "  {} {:>3}   {} {:>3}   {} {:>3}   {} {:>3}   {} {:>3}",
+        style.red("CRITICAL"),
+        critical,
+        style.red("HIGH"),
+        high,
+        style.yellow("MEDIUM"),
+        medium,
+        style.green("LOW"),
+        low,
+        style.dim("INFO"),
+        informational
+    );
+    println!(
+        "  {} misconfiguration(s) · {} exposure(s) · {} error(s)",
+        misconfigurations, exposures, errors
+    );
+
+    if discovery.service_count() > 0 {
+        println!();
+        println!("{}", style.bold("SERVICES"));
+        println!(
+            "  {:<15} {:<5} {:<16} {:<24} VERSION",
+            "HOST", "PORT", "SERVICE", "PRODUCT"
+        );
+        for host in &discovery.hosts {
+            for service in &host.services {
+                let protocol = match service.protocol {
+                    Protocol::Tcp => "tcp",
+                    Protocol::Udp => "udp",
+                };
+                let service_name = service.service.as_deref().unwrap_or("unknown");
+                let product = service.product.as_deref().unwrap_or("-");
+                let version = service.version.as_deref().unwrap_or("-");
+                println!(
+                    "  {:<15} {:<5} {:<16} {:<24} {}",
+                    truncate(&format!("{}:{protocol}", host.address), 15),
+                    service.port,
+                    truncate(service_name, 16),
+                    truncate(product, 24),
+                    truncate(version, 18)
+                );
+            }
+        }
+    }
+
+    let status = if alarms > 0 || errors > 0 {
         style.red("✗ attention needed")
     } else {
         style.green("✓ complete")
     };
     println!(
-        "{} {}  {} vulnerabilities · {} errors · {} informational",
+        "\n{} {}  {} findings · {} errors · {} informational",
         status,
         style.bold("Scan complete"),
-        vulnerabilities,
+        alarms,
         errors,
         informational
     );
+}
+
+fn severity_count(findings: &[Finding], lower: f64, upper: f64) -> usize {
+    findings
+        .iter()
+        .filter(|finding| finding.result_type == "Alarm")
+        .filter_map(|finding| finding.severity)
+        .filter(|severity| *severity >= lower && *severity < upper)
+        .count()
+}
+
+fn truncate(value: &str, width: usize) -> String {
+    if value.chars().count() <= width {
+        return value.to_string();
+    }
+    let mut result = value
+        .chars()
+        .take(width.saturating_sub(1))
+        .collect::<String>();
+    result.push('…');
+    result
+}
+
+fn category_label(category: &FindingCategory) -> &'static str {
+    match category {
+        FindingCategory::Vulnerability => "Vulnerability",
+        FindingCategory::Misconfiguration => "Misconfiguration",
+        FindingCategory::Exposure => "Exposure",
+        FindingCategory::Information => "Information",
+    }
+}
+
+fn confidence_label(level: &crate::confidence::ConfidenceLevel) -> &'static str {
+    level.as_str()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate;
+
+    #[test]
+    fn truncates_wide_terminal_columns_without_panicking() {
+        assert_eq!(truncate("OpenSSH_9.6p1", 8), "OpenSSH…");
+        assert_eq!(truncate("http", 8), "http");
+    }
 }
