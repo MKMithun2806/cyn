@@ -4,6 +4,7 @@ use std::sync::Arc;
 use futures::StreamExt;
 use tokio::sync::mpsc;
 
+use crate::confidence::Confidence;
 use crate::config::Config;
 use crate::discovery::{DiscoveryResult, Protocol};
 use crate::error::CynError;
@@ -51,6 +52,8 @@ pub struct Finding {
     pub detection_reason: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
+    #[serde(default)]
+    pub confidence: Confidence,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -389,6 +392,8 @@ fn result_to_finding(
         });
     }
 
+    let confidence = crate::confidence::assess(result_type, &evidence);
+
     // Look up VT metadata for name, severity, CVEs, etc.
     let (name, severity, solution, references, cves) =
         if let Some(vt) = result.oid.as_ref().and_then(|o| vt_metadata.get(o)) {
@@ -436,6 +441,7 @@ fn result_to_finding(
             result_type
         )),
         source: Some("OpenVAS VT feed".into()),
+        confidence,
     })
 }
 

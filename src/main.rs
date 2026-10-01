@@ -1,4 +1,5 @@
 mod cli;
+mod confidence;
 mod config;
 mod discovery;
 mod error;

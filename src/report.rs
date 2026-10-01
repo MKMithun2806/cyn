@@ -12,7 +12,7 @@ pub fn generate_csv(findings: &[Finding]) -> String {
     let mut w = Vec::new();
     writeln!(
         w,
-        "host,port,protocol,oid,name,severity,cves,solution,references,result_type,service,product,version,evidence,detection_reason,source"
+        "host,port,protocol,oid,name,severity,cves,solution,references,result_type,service,product,version,evidence,detection_reason,source,confidence_score,confidence_level"
     )
     .unwrap();
 
@@ -40,7 +40,7 @@ pub fn generate_csv(findings: &[Finding]) -> String {
 
         writeln!(
             w,
-            "\"{}\",{},{},\"{}\",\"{}\",{},\"{}\",\"{}\",\"{}\",{},\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"",
+            "\"{}\",{},{},\"{}\",\"{}\",{},\"{}\",\"{}\",\"{}\",{},\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",{},\"{}\"",
             f.host,
             port,
             protocol,
@@ -56,7 +56,9 @@ pub fn generate_csv(findings: &[Finding]) -> String {
             version,
             evidence,
             detection_reason,
-            source
+            source,
+            f.confidence.score,
+            f.confidence.level.as_str()
         )
         .unwrap();
     }
@@ -98,6 +100,7 @@ pub fn load_findings(path: &Path) -> Result<Vec<Finding>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::confidence::Confidence;
     use crate::scanner::Evidence;
 
     fn sample_findings() -> Vec<Finding> {
@@ -121,6 +124,7 @@ mod tests {
                 evidence: vec![],
                 detection_reason: None,
                 source: None,
+                confidence: Confidence::default(),
             },
             Finding {
                 host: "192.168.1.1".into(),
@@ -145,6 +149,7 @@ mod tests {
                 }],
                 detection_reason: None,
                 source: None,
+                confidence: Confidence::default(),
             },
         ]
     }
@@ -192,6 +197,7 @@ mod tests {
             evidence: vec![],
             detection_reason: None,
             source: None,
+            confidence: Confidence::default(),
         }];
         let csv = generate_csv(&findings);
         assert!(csv.contains("\"Test \"\"quoted\"\" value\""));
@@ -203,5 +209,6 @@ mod tests {
         let findings: Vec<Finding> = serde_json::from_str(legacy).unwrap();
         assert!(findings[0].evidence.is_empty());
         assert!(findings[0].service.is_none());
+        assert_eq!(findings[0].confidence.score, 0);
     }
 }
