@@ -1,0 +1,733 @@
+// SPDX-FileCopyrightText: 2024 Greenbone AG
+//
+// SPDX-License-Identifier: GPL-2.0-or-later WITH x11vnc-openssl-exception
+
+//! Defines the context used within the interpreter and utilized by the builtin functions
+
+use crate::models::{AliveTestMethods, Port, Protocol, ScanPreference};
+use crate::nasl::utils::indexed_arena::{ArenaIndex, IndexedArena};
+use async_trait::async_trait;
+use rand::seq::IndexedRandom;
+use tokio::sync::RwLock;
+
+use crate::nasl::builtin::{KBError, NaslSockets};
+use crate::nasl::syntax::Loader;
+use crate::nasl::{FromNaslValue, WithErrorInfo};
+use crate::notus::Notus;
+use crate::scanner::preferences::preference::{ScanPrefs, pref_is_true};
+use crate::storage::error::StorageError;
+use crate::storage::items::kb::{self, KbKey};
+use crate::storage::items::kb::{GetKbContextKey, KbContextKey, KbItem};
+use crate::storage::items::nvt::Oid;
+use crate::storage::items::nvt::{FeedVersion, FileName};
+use crate::storage::items::result::{ResultContextKeySingle, ResultItem};
+use crate::storage::{self, ScanID};
+use crate::storage::{Dispatcher, Remover, Retriever};
+//TODO: rename
+use crate::models::VTData;
+use std::collections::BTreeSet;
+use std::sync::{Arc, MutexGuard};
+
+use super::error::ReturnBehavior;
+use super::executor::Executor;
+use super::hosts::{LOCALHOST, resolve_hostname};
+use super::{FnError, Register};
+use std::net::IpAddr;
+use std::sync::Mutex;
+
+#[derive(Debug, Clone)]
+pub struct VHost {
+    source: String,
+    hostname: String,
+}
+
+impl VHost {
+    pub fn hostname(&self) -> &str {
+        &self.hostname
+    }
+
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Target {
+    /// The original target. IP or hostname
+    original_target_str: String,
+    /// The IP address of the target.
+    ip_addr: IpAddr,
+    /// Whether the string given to `Target` was a hostname or an ip address.
+    kind: TargetKind,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Ports {
+    /// The TCP ports to test against.
+    pub tcp: BTreeSet<u16>,
+    /// The UDP ports to test against.
+    pub udp: BTreeSet<u16>,
+}
+
+impl From<Vec<Port>> for Ports {
+    fn from(ports: Vec<Port>) -> Self {
+        let tcp = ports
+            .clone()
+            .into_iter()
+            .filter(|p| p.protocol.unwrap_or(Protocol::TCP) == Protocol::TCP)
+            .flat_map(|p| p.range.into_iter())
+            .flat_map(|p| p.into_iter())
+            .collect();
+
+        let udp = ports
+            .clone()
+            .into_iter()
+            .filter(|p| p.protocol.unwrap_or(Protocol::UDP) == Protocol::UDP)
+            .flat_map(|p| p.range.into_iter())
+            .flat_map(|p| p.into_iter())
+            .collect();
+
+        Self { tcp, udp }
+    }
+}
+
+/// Specifies whether the string given to `Target` was a hostname
+/// or an ip address.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TargetKind {
+    Hostname,
+    IpAddr,
+}
+
+#[derive(Debug)]
+pub struct CtxTarget {
+    /// The target
+    target: Target,
+    // The shared state is guarded by a mutex. This is a `std::sync::Mutex` and
+    // not a Tokio mutex. This is because there are no asynchronous operations
+    // being performed while holding the mutex. Additionally, the critical
+    // sections are very small.
+    //
+    // A Tokio mutex is mostly intended to be used when locks need to be held
+    // across `.await` yield points. All other cases are **usually** best
+    // served by a std mutex. If the critical section does not include any
+    // async operations but is long (CPU intensive or performing blocking
+    // operations), then the entire operation, including waiting for the mutex,
+    // is considered a "blocking" operation and `tokio::task::spawn_blocking`
+    // should be used.
+    /// vhost list which resolve to the IP address and their sources.
+    vhosts: Mutex<Vec<VHost>>,
+    /// The TCP ports to test against.
+    ports_tcp: BTreeSet<u16>,
+    /// The UDP ports to test against.
+    ports_udp: BTreeSet<u16>,
+}
+
+pub type CtxTargets = IndexedArena<TargetId, CtxTarget>;
+
+impl CtxTargets {
+    pub fn single(t: Target, ports: Ports) -> (Self, TargetId) {
+        let mut arena = Self::default();
+        let id = arena.add(CtxTarget::new(t, ports));
+        (arena, id)
+    }
+}
+
+impl Target {
+    pub fn localhost() -> Self {
+        Self {
+            original_target_str: LOCALHOST.to_string(),
+            ip_addr: LOCALHOST,
+            kind: TargetKind::IpAddr,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn do_not_resolve_hostname(target: impl AsRef<str>) -> Self {
+        let (ip_addr, kind) = match target.as_ref().parse::<IpAddr>() {
+            Ok(ip_addr) => (ip_addr, TargetKind::IpAddr),
+            Err(_) => (LOCALHOST, TargetKind::Hostname),
+        };
+        Self {
+            original_target_str: target.as_ref().into(),
+            ip_addr,
+            kind,
+        }
+    }
+
+    pub fn resolve_hostname(target: impl AsRef<str>) -> Option<Self> {
+        // Try to parse as IpAddr first
+        let (ip_addr, kind) = if let Ok(ip_addr) = target.as_ref().parse::<IpAddr>() {
+            (ip_addr, TargetKind::IpAddr)
+        } else {
+            let ip_addr = resolve_hostname(target.as_ref())
+                .ok()
+                .and_then(|ip_addrs| ip_addrs.into_iter().next())?;
+            (ip_addr, TargetKind::Hostname)
+        };
+        Some(Self {
+            original_target_str: target.as_ref().into(),
+            ip_addr,
+            kind,
+        })
+    }
+
+    pub fn original_target_str(&self) -> &str {
+        &self.original_target_str
+    }
+
+    pub fn ip_addr(&self) -> IpAddr {
+        self.ip_addr
+    }
+
+    #[cfg(test)]
+    fn kind(&self) -> &TargetKind {
+        &self.kind
+    }
+}
+
+impl CtxTarget {
+    pub fn new(target: Target, ports: Ports) -> Self {
+        CtxTarget {
+            target,
+            vhosts: Mutex::new(vec![]),
+            ports_tcp: ports.tcp,
+            ports_udp: ports.udp,
+        }
+    }
+
+    pub fn add_hostname(&self, hostname: String, source: String) -> &CtxTarget {
+        self.vhosts.lock().unwrap().push(VHost { hostname, source });
+        self
+    }
+
+    pub fn original_target_str(&self) -> &str {
+        &self.target.original_target_str
+    }
+
+    pub fn ip_addr(&self) -> IpAddr {
+        self.target.ip_addr
+    }
+
+    pub fn kind(&self) -> &TargetKind {
+        &self.target.kind
+    }
+
+    /// Return the hostname that this `Target` was constructed with
+    /// or None otherwise
+    pub fn hostname(&self) -> Option<String> {
+        match self.target.kind {
+            TargetKind::Hostname => Some(self.target.original_target_str.clone()),
+            TargetKind::IpAddr => None,
+        }
+    }
+
+    pub fn vhosts(&self) -> MutexGuard<'_, Vec<VHost>> {
+        self.vhosts.lock().unwrap()
+    }
+
+    pub fn ports_tcp(&self) -> &BTreeSet<u16> {
+        &self.ports_tcp
+    }
+
+    pub fn configured_tcp_ports(&self) -> Vec<u16> {
+        self.ports_tcp.iter().cloned().collect()
+    }
+}
+
+#[async_trait]
+pub trait ContextStorage:
+    Sync
+    + Send
+    // kb
+    + Dispatcher<KbContextKey, Item = KbItem>
+    + Retriever<KbContextKey, Item = Vec<KbItem>>
+    + Retriever<GetKbContextKey, Item = Vec<(String, Vec<KbItem>)>>
+    + Remover<KbContextKey, Item = Vec<KbItem>>
+    // results
+    + Dispatcher<ScanID, Item = ResultItem>
+    + Retriever<ResultContextKeySingle, Item = ResultItem>
+    + Remover<ScanID, Item = Vec<ResultItem>>
+    // nvt
+    + Dispatcher<FileName, Item = VTData>
+    + Dispatcher<FeedVersion, Item = String>
+    + Retriever<Oid, Item = VTData> + Retriever<FileName, Item = VTData>
+{
+    /// By default the KbKey can hold multiple values. When dispatch is used on an already existing
+    /// KbKey, the value is appended to the existing list. This function is used to replace the
+    /// existing entry with the new one.
+    async fn dispatch_replace(&self, key: KbContextKey, item: KbItem) -> Result<(), StorageError> {
+        self.remove(&key).await?;
+        self.dispatch(key, item).await
+    }
+
+}
+
+impl<T> ContextStorage for T where
+    T: Sync
+        + Send
+        // kb
+        + Dispatcher<KbContextKey, Item = KbItem>
+        + Retriever<KbContextKey, Item = Vec<KbItem>>
+        + Retriever<GetKbContextKey, Item = Vec<(String, Vec<KbItem>)>>
+        + Remover<KbContextKey, Item = Vec<KbItem>>
+        // results
+        + Dispatcher<ScanID, Item = ResultItem>
+        + Retriever<ResultContextKeySingle, Item = ResultItem>
+        + Remover<ScanID, Item = Vec<ResultItem>>
+        // nvt
+        + Dispatcher<FileName, Item = VTData>
+        + Dispatcher<FeedVersion, Item = String>
+        + Retriever<Oid, Item = VTData>
+        + Retriever<FileName, Item = VTData>
+{
+}
+
+#[derive(Clone)]
+pub enum NotusCtx {
+    Direct(Arc<Mutex<Notus>>),
+    /// The URL to the Notus endpoint of a Skiron service
+    ///(e.g. `http://127.0.0.1:8085/skiron/v2/api/scanNotus`).
+    Address(url::Url),
+}
+
+/// An index into the `targets` field on `ScanCtx`
+#[derive(Clone, Copy, Debug)]
+pub struct TargetId(usize);
+
+impl ArenaIndex for TargetId {
+    fn to_index(self) -> usize {
+        self.0
+    }
+
+    fn from_index(index: usize) -> Self {
+        Self(index)
+    }
+}
+
+/// NASL execution context.
+pub struct ScanCtx<'a> {
+    /// The key for this context.
+    scan: ScanID,
+    /// Targets against which the scan is run.
+    targets: CtxTargets,
+    /// Storage
+    storage: &'a dyn ContextStorage,
+    /// Loader
+    loader: &'a Loader,
+    /// Function executor.
+    executor: &'a Executor,
+    sockets: RwLock<NaslSockets>,
+    /// Scanner preferences
+    pub scan_preferences: ScanPrefs,
+    /// Alive test methods
+    alive_test_methods: Vec<AliveTestMethods>,
+    /// Notus
+    pub notus: Option<NotusCtx>,
+}
+
+impl<'a> ScanCtx<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        scan: ScanID,
+        targets: CtxTargets,
+        storage: &'a dyn ContextStorage,
+        loader: &'a Loader,
+        executor: &'a Executor,
+        scan_preferences: ScanPrefs,
+        alive_test_methods: Vec<AliveTestMethods>,
+        notus: Option<NotusCtx>,
+    ) -> Self {
+        let mut sockets = NaslSockets::default();
+        sockets.with_recv_timeout(scan_preferences.get_preference_int("checks_read_timeout"));
+
+        Self {
+            scan,
+            targets,
+            storage,
+            loader,
+            executor,
+            sockets: RwLock::new(sockets),
+            scan_preferences,
+            alive_test_methods,
+            notus,
+        }
+    }
+
+    /// Executes a function by name
+    ///
+    /// Returns None when the function was not found.
+    pub async fn execute_builtin_fn(
+        &self,
+        name: &str,
+        register: &Register,
+        script_ctx: &mut ScriptCtx<'_>,
+    ) -> Option<super::NaslResult> {
+        const NUM_RETRIES_ON_RETRYABLE_ERROR: usize = 5;
+
+        let mut i = 0;
+        loop {
+            i += 1;
+            let result = self.executor.exec(name, self, register, script_ctx).await;
+            if let Some(Err(ref e)) = result
+                && e.retryable()
+                && i < NUM_RETRIES_ON_RETRYABLE_ERROR
+            {
+                continue;
+            }
+            return result;
+        }
+    }
+
+    /// Checks if a function is defined
+    pub fn nasl_fn_defined(&self, name: &str) -> bool {
+        self.executor.contains(name)
+    }
+
+    /// Get the Key
+    pub fn scan(&self) -> &ScanID {
+        &self.scan
+    }
+
+    /// Get the storage
+    pub fn storage(&self) -> &dyn ContextStorage {
+        self.storage
+    }
+
+    /// Get the loader
+    pub fn loader(&self) -> &Loader {
+        self.loader
+    }
+
+    pub fn scan_params(&self) -> impl Iterator<Item = &ScanPreference> {
+        self.scan_preferences.iter()
+    }
+
+    pub fn alive_test_methods(&self) -> Vec<AliveTestMethods> {
+        self.alive_test_methods.clone()
+    }
+
+    fn get_preference_bool(&self, key: &str) -> Option<bool> {
+        let prefs = &self.scan_preferences;
+        pref_is_true(prefs, key)
+    }
+
+    pub async fn read_sockets(&self) -> tokio::sync::RwLockReadGuard<'_, NaslSockets> {
+        self.sockets.read().await
+    }
+
+    pub async fn write_sockets(&self) -> tokio::sync::RwLockWriteGuard<'_, NaslSockets> {
+        self.sockets.write().await
+    }
+
+    pub(crate) fn add_fn_global_vars(&self, register: &mut Register) {
+        for (name, val) in self.executor.iter_fn_global_vars() {
+            register.add_global_var(name, val);
+        }
+    }
+
+    pub(crate) fn target_by_id(&self, target_id: TargetId) -> &CtxTarget {
+        &self.targets[target_id]
+    }
+
+    pub fn scan_mut(&mut self) -> &mut ScanID {
+        &mut self.scan
+    }
+
+    pub fn targets(&self) -> &CtxTargets {
+        &self.targets
+    }
+}
+
+/// Struct to hold joins to multicast groups.
+#[derive(Default)]
+pub struct JmpDesc {
+    pub in_addr: Option<IpAddr>,
+    pub count: usize,
+}
+
+pub struct ScriptCtx<'a> {
+    pub alive: bool,
+    pub denial_port: Option<u16>,
+    pub multicast_groups: Vec<JmpDesc>,
+    pub snmp_next: Option<String>,
+    scan_ctx: &'a ScanCtx<'a>,
+    target_id: TargetId,
+    vt: VTData,
+}
+
+impl<'a> ScriptCtx<'a> {
+    pub fn new(scan_ctx: &'a ScanCtx, target_id: TargetId, vt: VTData) -> Self {
+        Self {
+            alive: false,
+            denial_port: None,
+            multicast_groups: vec![],
+            snmp_next: None,
+            scan_ctx,
+            target_id,
+            vt,
+        }
+    }
+
+    pub(crate) fn target(&self) -> &CtxTarget {
+        self.scan_ctx.target_by_id(self.target_id)
+    }
+
+    pub fn vt_mut(&mut self) -> &mut VTData {
+        &mut self.vt
+    }
+
+    pub fn vt(&self) -> &VTData {
+        &self.vt
+    }
+
+    pub fn take_vt(self) -> VTData {
+        self.vt
+    }
+
+    fn kb_context_key(&self, key: KbKey) -> KbContextKey {
+        KbContextKey(
+            (
+                self.scan_ctx.scan.clone(),
+                storage::Target(self.target().ip_addr().to_string()),
+            ),
+            key,
+        )
+    }
+
+    pub async fn set_kb_item(&self, key: KbKey, value: KbItem) -> Result<(), FnError> {
+        self.scan_ctx
+            .storage
+            .dispatch(self.kb_context_key(key), value)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn set_single_kb_item<T: Into<KbItem>>(
+        &self,
+        key: KbKey,
+        value: T,
+    ) -> Result<(), FnError> {
+        self.scan_ctx
+            .storage
+            .dispatch_replace(self.kb_context_key(key), value.into())
+            .await?;
+        Ok(())
+    }
+
+    /// Sets the state of a port
+    pub async fn set_port_transport(&self, port: u16, transport: usize) -> Result<(), FnError> {
+        self.set_single_kb_item(
+            KbKey::Transport(kb::Transport::Tcp(port.to_string())),
+            KbItem::Number(transport as i64),
+        )
+        .await
+    }
+
+    async fn get_single_kb_item_inner(&self, key: &KbKey) -> Result<KbItem, FnError> {
+        let result = self
+            .scan_ctx
+            .storage()
+            .retrieve(&self.kb_context_key(key.clone()))
+            .await?;
+        let item = result.ok_or_else(|| KBError::ItemNotFound(key.to_string()))?;
+
+        match item.len() {
+            0 => Ok(KbItem::Null),
+            1 => Ok(item[0].clone()),
+            _ => Err(KBError::MultipleItemsFound(key.to_string()).into()),
+        }
+    }
+
+    /// Return a single item from the knowledge base.
+    /// If multiple entries are found (which would result
+    /// in forking the interpreter), return an error.
+    /// This function automatically converts the item
+    /// to a specific type via its `FromNaslValue` impl
+    /// and returns the appropriate error if necessary.
+    pub async fn get_single_kb_item<T: for<'b> FromNaslValue<'b>>(
+        &self,
+        key: &KbKey,
+    ) -> Result<T, FnError> {
+        // If we find multiple or no items at all, return an error that
+        // exits the script instead of continuing execution with a return
+        // value, since this is most likely an error in the feed.
+        let val = self
+            .get_single_kb_item_inner(key)
+            .await
+            .map_err(|e| e.with(ReturnBehavior::ExitScript))?;
+        T::from_nasl_value(&val.into())
+    }
+
+    pub async fn get_port_transport(&self, port: u16) -> Option<i64> {
+        self.get_single_kb_item_inner(&KbKey::Transport(kb::Transport::Tcp(port.to_string())))
+            .await
+            .ok()
+            .and_then(|item| match item {
+                KbItem::Number(n) => Some(n),
+                _ => None,
+            })
+    }
+
+    pub async fn get_kb_item(&self, key: &KbKey) -> Result<Vec<KbItem>, FnError> {
+        let result: Vec<KbItem> = self
+            .scan_ctx
+            .storage
+            .retrieve(&self.kb_context_key(key.clone()))
+            .await?
+            .unwrap_or_default();
+        Ok(result)
+    }
+
+    async fn get_kb_items_with_keys(
+        &self,
+        key: &KbKey,
+    ) -> Result<Vec<(String, Vec<KbItem>)>, FnError> {
+        let result = self
+            .scan_ctx
+            .storage
+            .retrieve(&GetKbContextKey(
+                (
+                    self.scan_ctx.scan.clone(),
+                    storage::Target(self.target().ip_addr().to_string()),
+                ),
+                key.clone(),
+            ))
+            .await?
+            .unwrap_or_default();
+        Ok(result)
+    }
+
+    pub async fn get_port_state(&self, port: u16, protocol: Protocol) -> Result<bool, FnError> {
+        match protocol {
+            Protocol::TCP => {
+                if !self.target().ports_tcp.contains(&port)
+                    || self
+                        .get_kb_item(&KbKey::Host(kb::Host::Tcp))
+                        .await?
+                        .is_empty()
+                {
+                    return Ok(!self
+                        .scan_ctx
+                        .get_preference_bool("unscanned_closed")
+                        .unwrap_or(true));
+                }
+                self.get_single_kb_item(&KbKey::Port(kb::Port::Tcp(port.to_string())))
+                    .await
+            }
+            Protocol::UDP => {
+                if !self.target().ports_udp.contains(&port)
+                    || self
+                        .get_kb_item(&KbKey::Host(kb::Host::Udp))
+                        .await?
+                        .is_empty()
+                {
+                    return Ok(!self
+                        .scan_ctx
+                        .get_preference_bool("unscanned_closed_udp")
+                        .unwrap_or(true));
+                }
+                self.get_single_kb_item(&KbKey::Port(kb::Port::Udp(port.to_string())))
+                    .await
+            }
+        }
+    }
+
+    /// Looks up open TCP ports from the knowledge base
+    pub async fn get_open_tcp_ports(&self) -> Result<Vec<u16>, FnError> {
+        let open_ports = self
+            .get_kb_items_with_keys(&KbKey::Port(kb::Port::Tcp("*".to_string())))
+            .await?;
+
+        let port_numbers: Vec<u16> = open_ports
+            .iter()
+            .filter_map(|(key, _values)| {
+                // Key format is "Ports/tcp/{port}"
+                key.split('/')
+                    .next_back()
+                    .and_then(|port_str| port_str.parse().ok())
+            })
+            .collect();
+
+        // If no ports found in KB, fall back to the ports configured in the scan
+        if port_numbers.is_empty() {
+            Ok(self.target().configured_tcp_ports())
+        } else {
+            Ok(port_numbers)
+        }
+    }
+
+    /// Don't always return the first open port, otherwise
+    /// we might get bitten by OSes doing active SYN flood
+    /// countermeasures. Also, avoid returning 80 and 21 as
+    /// open ports, as many transparent proxies are acting for these...
+    pub async fn get_random_open_tcp_port(&self) -> Result<u16, FnError> {
+        let mut open21 = false;
+        let mut open80 = false;
+        let all_ports = self.get_open_tcp_ports().await?;
+        let ports: Vec<u16> = all_ports
+            .iter()
+            .filter_map(|&port| {
+                if port == 21 {
+                    open21 = true;
+                    None
+                } else if port == 80 {
+                    open80 = true;
+                    None
+                } else {
+                    Some(port)
+                }
+            })
+            .collect();
+
+        let ret = if !ports.is_empty() {
+            *ports.choose(&mut rand::rng()).unwrap()
+        } else if open21 {
+            21
+        } else if open80 {
+            80
+        } else {
+            0
+        };
+        Ok(ret)
+    }
+
+    // TODO: Figure out what to do about this - what is the correct
+    // logic for the multicast groups?
+    pub(crate) fn clone_shallow(&self) -> ScriptCtx<'a> {
+        Self {
+            alive: self.alive,
+            denial_port: self.denial_port,
+            multicast_groups: vec![],
+            snmp_next: self.snmp_next.clone(),
+            scan_ctx: self.scan_ctx,
+            target_id: self.target_id,
+            vt: self.vt.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::nasl::utils::ctx::TargetKind;
+
+    use super::Target;
+
+    #[test]
+    fn target_kind() {
+        assert_eq!(
+            Target::do_not_resolve_hostname("1.2.3.4").kind(),
+            &TargetKind::IpAddr
+        );
+        assert_eq!(
+            Target::do_not_resolve_hostname("foo").kind(),
+            &TargetKind::Hostname
+        );
+        // This should not do any actual resolution
+        // but immediately parse the IP address instead.
+        assert_eq!(
+            Target::resolve_hostname("1.2.3.4").unwrap().kind(),
+            &TargetKind::IpAddr
+        );
+    }
+}

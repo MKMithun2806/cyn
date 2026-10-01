@@ -1,0 +1,6 @@
+tmp/
+include/
+bin/
+share/
+lib/
+build-cache/

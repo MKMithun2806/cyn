@@ -1,0 +1,145 @@
+// SPDX-FileCopyrightText: 2023 Greenbone AG
+//
+// SPDX-License-Identifier: GPL-2.0-or-later WITH x11vnc-openssl-exception
+
+// We allow this fow now, since it would require lots of changes
+// but should eventually solve this.
+#![allow(clippy::result_large_err)]
+#![doc = include_str!("README.md")]
+// We allow this fow now, since it would require lots of changes
+// but should eventually solve this.
+
+#[cfg(test)]
+mod api_tests;
+mod config;
+mod container_image_scanner;
+mod crypt;
+mod database;
+mod greenbone_scanner_framework;
+mod json_stream;
+mod notus;
+mod scans;
+mod vts;
+
+use sqlx::migrate::Migrator;
+use std::{
+    marker::{Send, Sync},
+    sync::Arc,
+};
+
+use config::{Config, StorageType};
+use container_image_scanner::config::{DBLocation, SqliteConfiguration};
+use greenbone_scanner_framework::{End, RuntimeBuilder, ServerCertificate};
+use notus::config_to_products;
+use scannerlib::models::FeedState;
+use scannerlib::utils::version::show_version;
+use sqlx::SqlitePool;
+
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+static MIGRATOR: Migrator = sqlx::migrate!();
+
+// TODO: move to config
+async fn setup_sqlite(config: &Config) -> Result<SqlitePool> {
+    let result = match config.storage.clone() {
+        config::StorageTypes::V1(storage_v1) => {
+            let mut sqliteconfig = SqliteConfiguration::default();
+
+            match storage_v1.storage_type {
+                StorageType::InMemory | StorageType::Redis => {}
+                StorageType::FileSystem if storage_v1.fs.path.is_dir() => {
+                    let mut p = storage_v1.fs.path.clone();
+                    p.push("openvasd.db");
+                    sqliteconfig.location = DBLocation::File(p);
+                }
+                StorageType::FileSystem => {
+                    sqliteconfig.location = DBLocation::File(storage_v1.fs.path);
+                }
+            };
+            sqliteconfig
+        }
+        config::StorageTypes::V2(sqlite_configuration) => sqlite_configuration,
+    }
+    .create_pool("openvasd")
+    .await?;
+    MIGRATOR.run(&result).await?;
+    Ok(result)
+}
+
+async fn build_runtime(config: Config) -> Result<RuntimeBuilder<End>> {
+    let products = config_to_products(&config);
+    let pool = setup_sqlite(&config).await?;
+    let feed_snapshot = Arc::new(std::sync::RwLock::new(FeedState::Unknown));
+    let (sender, vts) = vts::init(pool.clone(), &config, feed_snapshot.clone()).await;
+    let vts = Arc::new(vts);
+    let scan = scans::init(pool.clone(), &config, sender).await?;
+    let (get_notus, post_notus) = notus::init(products.clone());
+
+    let mut rb = RuntimeBuilder::<greenbone_scanner_framework::End>::new(config.listener.address)
+        .feed_version(feed_snapshot.clone());
+    if let Some(api_key) = config.endpoints.key.clone() {
+        rb = rb.api_keys(vec![api_key]);
+    }
+    match (config.tls.certs.clone(), config.tls.key.clone()) {
+        (Some(certificate), Some(key)) => {
+            rb = rb.server_tls_cer(ServerCertificate::new(key, certificate))
+        }
+        (None, None) => {
+            // ok no TLS
+        }
+        _ => {
+            tracing::warn!(
+                "Invalid TLS configuration. Please provide a certificate path and a key path. Falling back to http."
+            )
+        }
+    };
+    if !config.feed.signature_check {
+        tracing::warn!(
+            "Integrity check for feed has been disabled. Neither hashsums nor GPG signature will get verified."
+        );
+    }
+    if let Some(client_certs) = config.tls.client_certs.clone() {
+        rb = rb.path_client_certs(client_certs);
+    }
+
+    let (cis_scans, cis_vts) = container_image_scanner::init(
+        pool.clone(),
+        feed_snapshot,
+        products,
+        config.container_image_scanner,
+    )
+    .await?;
+
+    Ok(rb
+        .insert_scans(Arc::new(scan))
+        .insert_get_vts(vts.clone())
+        .max_concurrent_connections(config.storage.max_http_connections())
+        .add_request_handler(get_notus)
+        .add_request_handler(post_notus)
+        .insert_additional_scan_endpoints(Arc::new(cis_scans), Arc::new(cis_vts)))
+}
+
+async fn _main() -> Result<i32> {
+    let config = Config::load();
+    let _guard = config.logging.init();
+
+    show_version("openvasd");
+    if config.version {
+        return Ok(0);
+    }
+
+    build_runtime(config).await?.run_blocking().await
+}
+
+#[tokio::main]
+async fn main() {
+    let rc = match _main().await {
+        Ok(x) => x,
+        Err(error) => {
+            panic!("{error}")
+        }
+    };
+    // we call process exit, on return ExitCode it kept lingering.
+    // when a task is blocking.
+    std::process::exit(rc);
+}

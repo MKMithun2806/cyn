@@ -1,0 +1,24 @@
+# Breaking changes in next version
+A list of breaking changes we might want to do in a future NASL version.
+
+## Autoconversion
+* Simplify the autoconversion rules (i.e. strings magically being turned into integers, arrays into bools and so on, ...). Prefer throwing errors over implicit conversions.
+
+## Obsolete operators
+Get rid of barely used operators such as the `x` operator and `>>>=`.
+
+## Control flow
+Disallow using `break` to escape from functions/the script.
+
+## Forking
+Remove the forking concept altogether.
+
+## FCT_ANON_ARGS
+Think of a cleaner construct to allow variadics.
+
+## Implicit variable creation
+Multiple operations currently implicitly create a variable if it was not defined before the operation. Example: Increment/Decrement operators, array indexing. `a++` will implicitly create a variable `a` and initialize it to zero.
+The proposed change makes code referencing a non-existent variable return an error instead.
+
+## Variable owner scope
+NASL C interpreter handles variables in local or global scopes. A variable created and set inside e.g. in an `if` scope, it can be accessed from outside the scope. The proposed change makes the code to remove the variable once the scope is dropped. The new behavior is already implemented under the `naslv2` feature. Default is nasl v1, for backward compatibility.

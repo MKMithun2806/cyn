@@ -1,0 +1,142 @@
+name: Container
+
+on:
+  workflow_call:
+    inputs:
+      is_latest_tag:
+        required: true
+        type: string
+      is_version_tag:
+        required: true
+        type: string
+      binary_version:
+        required: false
+        type: string
+    secrets:
+      dockerhub_user:
+        required: true
+      dockerhub_token:
+        required: true
+      cosign_key_opensight:
+        required: true
+      cosign_password_opensight:
+        required: true
+      greenbone_bot_token:
+        required: true
+      greenbone_registry:
+        required: true
+      greenbone_registry_user:
+        required: true
+      greenbone_registry_token:
+        required: true
+      greenbone_registry_read_user:
+        required: true
+      greenbone_registry_read_token:
+        required: true
+      greenbone_registry_replication_user:
+        required: false
+      greenbone_registry_replication_token:
+        required: false
+
+# Grants rights to push to the Github container registry.
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  pull-requests: write
+
+jobs:
+  build:
+    if: ${{ github.repository == 'greenbone/openvas-scanner' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - build:
+              name: stable
+              dockerfile: .docker/prod.Dockerfile
+              stable-name: stable
+              edge-name: edge
+              variant-build-args: ""
+              tags: |
+                    type=raw,value=latest,enable=${{ inputs.is_latest_tag }}
+                    type=raw,value=stable,enable=${{ inputs.is_latest_tag }}
+                    type=semver,pattern={{version}},enable=${{ inputs.is_version_tag }}
+                    type=semver,pattern={{major}}.{{minor}},enable=${{ inputs.is_version_tag }}
+                    type=semver,pattern={{major}},enable=${{ inputs.is_version_tag }}
+                    type=raw,value=edge,enable=${{ github.ref_name == 'main' }}
+                    type=raw,value={{branch}}-{{sha}},enable=${{ github.ref_type == 'branch' && github.event_name == 'push' && github.ref_name != 'main' }}
+                    type=ref,event=pr
+          - build:
+              name: testing
+              dockerfile: .docker/prod.Dockerfile
+              stable-name: testing
+              edge-name: testing-edge
+              variant-build-args: |
+                VERSION=testing-edge
+                OPENVAS_SMB_IMAGE=greenbone/openvas-smb:testing-edge
+          - build:
+              name: oldstable
+              dockerfile: .docker/prod.Dockerfile
+              stable-name: oldstable
+              edge-name: oldstable-edge
+              variant-build-args: |
+                VERSION=oldstable
+                RUST_IMAGE=rust:bookworm
+    name: Build and Push Container Images (${{ matrix.build.name }})
+    uses: greenbone/workflows/.github/workflows/container-build-push-gea.yml@main
+    with:
+      name: ${{ matrix.build.name }}
+      dockerfile: ${{ matrix.build.dockerfile }}
+      stable-name: ${{ matrix.build.stable-name }}
+      edge-name: ${{ matrix.build.edge-name }}
+      enable-latest: ${{ matrix.build.name == 'stable' }}
+      enable-pr: ${{ matrix.build.name == 'stable' }}
+      enable-version: ${{ matrix.build.name == 'stable' }}
+      labels: |
+        org.opencontainers.image.vendor=Greenbone
+        org.opencontainers.image.base.name=debian:stable-slim
+      prefix: ${{ matrix.build.prefix }}
+      tags: ${{ matrix.tags }}
+      build-args: |
+        BIN_VERSION=${{ inputs.binary_version }}
+        ${{ matrix.build.variant-build-args }}
+      images: |
+        ghcr.io/${{ github.repository }},enable=true
+        ${{ vars.GREENBONE_REGISTRY }}/community/${{ github.event.repository.name }},enable=${{ github.event_name != 'pull_request' }}
+        ${{ vars.GREENBONE_REGISTRY }}/openvas-detect-dev/${{ github.event.repository.name }},enable=${{ github.event_name != 'pull_request' }}
+    secrets: inherit
+
+  trigger-replication:
+    needs:
+      - build
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && github.repository == 'greenbone/openvas-scanner' }}
+    runs-on: self-hosted-generic
+    steps:
+      - name: Ensure all tags are replicated on the public registry
+        uses: greenbone/actions/trigger-harbor-replication@v3.36.19
+        if: ${{ github.event_name != 'pull_request' }}
+        with:
+          registry: ${{ vars.GREENBONE_REGISTRY }}
+          token: ${{ secrets.GREENBONE_REGISTRY_REPLICATION_TOKEN }}
+          user: ${{ secrets.GREENBONE_REGISTRY_REPLICATION_USER }}
+
+  automatix:
+    name: Update Automatix
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') }}
+    needs: build
+    uses: greenbone/workflows/.github/workflows/automatix-service.yml@main
+    with:
+      service: openvas-scanner
+      url: ${{ vars.GREENBONE_REGISTRY }}/openvas-detect-dev/${{ github.event.repository.name }}
+      tag: ${{ github.ref_name }}
+      artifact-pattern: stable
+    secrets:
+      COSIGN_KEY_OPENSIGHT: ${{ secrets.cosign_key_opensight }}
+      COSIGN_KEY_PASSWORD_OPENSIGHT: ${{ secrets.cosign_password_opensight }}
+      GREENBONE_BOT_TOKEN: ${{ secrets.greenbone_bot_token }}
+      GREENBONE_REGISTRY: ${{ secrets.greenbone_registry }}
+      GREENBONE_REGISTRY_USER: ${{ secrets.greenbone_registry_user }}
+      GREENBONE_REGISTRY_TOKEN: ${{ secrets.greenbone_registry_token }}
+      GREENBONE_REGISTRY_READ_USER: ${{ secrets.greenbone_registry_read_user }}
+      GREENBONE_REGISTRY_READ_TOKEN: ${{ secrets.greenbone_registry_read_token }}

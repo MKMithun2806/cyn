@@ -1,0 +1,333 @@
+use std::sync::Arc;
+
+use futures::{StreamExt, TryFutureExt};
+use tokio::sync::RwLock;
+
+use crate::{
+    container_image_scanner::{
+        Config, ExternalError,
+        detection::{self, OperatingSystem},
+        image::{
+            Digest, Image, ImageParseError, ImageState, RegistryError,
+            extractor::{self, Extractor, FileSystemLocator},
+            packages::AllTypes,
+        },
+        messages::{self, CustomerMessage, DetailPair},
+        notus,
+        scheduling::db::{DataBase, images::DBImages},
+        timings::{Timed, Timing, TimingType},
+    },
+    database::dao::Fetch,
+};
+use scannerlib::{
+    models,
+    notus::{Notus, NotusError},
+};
+
+#[derive(Debug, thiserror::Error)]
+pub enum ScannerArchImageError {
+    #[error("Unable to detect operating-system: {0}")]
+    NoOS(#[from] ExternalError),
+    #[error("Unable check vulnerabilities: {0}")]
+    Notus(#[from] NotusError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ScannerError {
+    #[error("{0}")]
+    Image(#[from] ScannerArchImageError),
+
+    #[error("Extraction failed: {0}.")]
+    Extractor(#[from] extractor::ExtractorError),
+
+    #[error("Unable to parse: `{0}`. Most likely incorrect user input.")]
+    ImageParseError(#[from] ImageParseError),
+
+    #[error("{0}")]
+    RegistryError(#[from] RegistryError),
+}
+
+impl ScannerError {
+    pub fn can_retry(&self) -> bool {
+        match self {
+            Self::RegistryError(r) => r.can_retry(),
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct ImageResults {
+    os: Option<OperatingSystem>,
+    packages: Vec<String>,
+    results: Vec<models::Result>,
+}
+
+impl ImageResults {
+    fn no_packages(os: OperatingSystem) -> Self {
+        let os = Some(os);
+        Self {
+            os,
+            ..Default::default()
+        }
+    }
+
+    fn no_os() -> Self {
+        Self {
+            ..Default::default()
+        }
+    }
+
+    fn results(os: OperatingSystem, packages: Vec<String>, results: Vec<models::Result>) -> Self {
+        let os = Some(os);
+        Self {
+            os,
+            packages,
+            results,
+        }
+    }
+}
+
+impl Timed<ImageResults> {
+    async fn store_log_messages(
+        self,
+        pool: &DataBase,
+        id: &str,
+        image: &Image,
+        architecture: &str,
+        digest: &Image,
+        layer_timings: &[Timing],
+    ) -> Result<(), ScannerArchImageError> {
+        let (scan_duration, result) = self.unpack();
+        tracing::debug!(
+            architecture,
+            results = result.results.len(),
+            packages = result.packages.len(),
+            "Finished"
+        );
+        let mut messages = result.results;
+        messages.extend(
+            CustomerMessage::host_start_end(image, digest, scan_duration)
+                .into_iter()
+                .map(|x| x.into()),
+        );
+        let message = |msg| CustomerMessage::log(Some(image), Some(digest), msg, None).into();
+
+        let (image_extraction, image_download) =
+            layer_timings
+                .iter()
+                .fold((0, 0), |(ie, id), x| match x.kind() {
+                    TimingType::Download => (ie, id + x.micro_seconds()),
+                    TimingType::Extraction => (ie + x.micro_seconds(), id),
+                    // Aggregate timings are constructed below, not collected per layer.
+                    TimingType::Scan | TimingType::All => (ie, id),
+                });
+        let scan_timings = [
+            Timing::scan(&scan_duration),
+            Timing::new(None, TimingType::Extraction, image_extraction),
+            Timing::new(None, TimingType::Download, image_download),
+            Timing::new(
+                None,
+                TimingType::All,
+                image_download + image_extraction + scan_duration.as_micros(),
+            ),
+        ];
+        scan_timings.iter().for_each(|x| {
+            messages.push(message(x.msg()));
+        });
+        let host_detail = |dp| CustomerMessage::host_detail(image, digest, dp).into();
+        if let Some(os) = &result.os {
+            messages.extend_from_slice(&[
+                host_detail(DetailPair::OS(os)),
+                host_detail(DetailPair::OSCpe(os)),
+                host_detail(DetailPair::HostName(image)),
+                host_detail(DetailPair::Architecture(architecture)),
+                host_detail(DetailPair::Packages(result.packages)),
+            ]);
+        } else {
+            messages.push(host_detail(DetailPair::HostName(image)));
+            messages.push(host_detail(DetailPair::Architecture(architecture)));
+            messages.push(message(
+                "No operating system information found.".to_string(),
+            ));
+        }
+
+        messages::store(pool, id, &messages).await;
+
+        Ok(())
+    }
+}
+
+async fn scan_arch_image(
+    products: Arc<RwLock<Notus>>,
+    locator: &FileSystemLocator,
+    image: String,
+    digest: &Image,
+) -> Result<ImageResults, ScannerArchImageError> {
+    use detection::OperatingSystemDetectionError as OSDE;
+    match detection::operating_system(locator).await {
+        Ok(os) => {
+            let packages = AllTypes::packages(locator).await;
+
+            let results = if packages.is_empty() {
+                // This can also happen if a container image does not have a package DB anymore (e.g. the
+                // rpm db did get deleted on purpose) hence we treat it as an INFO not as an error.
+                ImageResults::no_packages(os)
+            } else {
+                let results = notus::vulnerabilities(
+                    products,
+                    locator.architecture(),
+                    image.clone(),
+                    Some(digest.to_string()),
+                    &os,
+                    packages.clone(),
+                )
+                .await?;
+                ImageResults::results(os, packages, results)
+            };
+
+            Ok(results)
+        }
+        Err(OSDE::NotFound | OSDE::Unknown) => Ok(ImageResults::no_os()),
+        Err(e) => Err(ScannerArchImageError::NoOS(e.into())),
+    }
+}
+
+async fn is_digest_excluded(
+    pool: &DataBase,
+    id: &str,
+    image: &Image,
+    digest: Option<&Digest>,
+) -> bool {
+    if let Some(digest) = digest {
+        let digest = image.clone().replace_tag(digest.as_ref().to_owned());
+        let image_state = DBImages::new(pool, (id, &digest)).fetch().await;
+        tracing::debug!(?image_state, %image, %digest, id);
+        matches!(image_state, Ok(Some(ImageState::Excluded)))
+    } else {
+        false
+    }
+}
+async fn download_and_extract_image<'a>(
+    config: Arc<Config>,
+    pool: &DataBase,
+    registry: &'a super::InitializedRegistry<'a>,
+    image: Image,
+) -> Result<(Digest, Extractor, Vec<Timing>), ScannerError> {
+    let mut extractor = Extractor::initialize(config.clone(), registry.id.clone()).await?;
+    let mut results = Vec::new();
+    let mut digest = None;
+
+    let mut layers = registry.registry.pull_image(image.clone());
+    tracing::debug!("downloading");
+    while let Some(packet) = layers.next().await {
+        let layer = packet?;
+        let lindex = layer.index;
+
+        if digest.is_none() {
+            digest = layer.digest.clone();
+            if is_digest_excluded(pool, registry.id.id(), &image, digest.as_ref()).await {
+                tracing::debug!(?digest, "Aborting download. Because the digest is excluded");
+                return Ok((digest.unwrap_or_default(), extractor, results));
+            }
+        }
+        results.push(Timing::download(lindex, &layer.download_time));
+
+        tracing::debug!(
+            download_time_ms = layer.download_time.as_millis(),
+            layer = lindex,
+            digest = ?layer.digest,
+            "downloaded"
+        );
+
+        let duration = extractor.extract(layer).await?;
+        results.push(Timing::extraction(lindex, &duration));
+
+        tracing::debug!(
+            extraction_ms = duration.as_millis(),
+            layer = lindex,
+            ?digest,
+            "extracted"
+        );
+    }
+    // This could potentially hold the last layer indefinitely due to the runtime behaviour of
+    // future polling. That's why we drop manually.
+    drop(layers);
+    tracing::debug!("downloaded");
+    Ok((digest.unwrap_or_default(), extractor, results))
+}
+
+async fn retry_download_and_extract_image<'a>(
+    config: Arc<Config>,
+    pool: &DataBase,
+    registry: &'a super::InitializedRegistry<'a>,
+    image: &Image,
+) -> Result<(Image, Extractor, Vec<Timing>), ScannerError> {
+    // alternatively set back to pending and store retry amount alongside the image
+    let mut retries = config.image.scanning_retries;
+    loop {
+        match download_and_extract_image(config.clone(), pool, registry, image.clone()).await {
+            Ok((digest, ex, benched)) => {
+                return Ok((image.clone().replace_tag(digest.into()), ex, benched));
+            }
+            Err(error) if error.can_retry() && retries > 0 => {
+                retries -= 1;
+                tracing::info!(%error, retries, "Retrying.");
+                tokio::time::sleep(config.image.retry_timeout).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+pub async fn scan_image<'a>(
+    config: Arc<Config>,
+    pool: DataBase,
+    products: Arc<RwLock<Notus>>,
+    registry: &'a super::InitializedRegistry<'a>,
+) -> Result<(), Vec<ScannerError>> {
+    let image: Image = registry
+        .id
+        .image()
+        .parse()
+        .map_err(|e| vec![ScannerError::from(e)])?;
+
+    let (digest, locator_per_arch, layer_timings) =
+        retry_download_and_extract_image(config, &pool, registry, &image)
+            .await
+            .map_err(|e| vec![e])?;
+    let locator_per_arch = locator_per_arch.locator().await;
+
+    let mut errors = Vec::with_capacity(locator_per_arch.len());
+    for locator in locator_per_arch.iter() {
+        let measured = Timed::measure_result(scan_arch_image(
+            products.clone(),
+            locator,
+            registry.id.image.to_owned(),
+            &digest,
+        ));
+
+        if let Err(e) = measured
+            .and_then(|results| {
+                results.store_log_messages(
+                    &pool,
+                    registry.id.id(),
+                    &image,
+                    locator.architecture(),
+                    &digest,
+                    &layer_timings,
+                )
+            })
+            .await
+        {
+            errors.push(e.into());
+        };
+    }
+    // drop manually because of polling behaviour
+    drop(locator_per_arch);
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}

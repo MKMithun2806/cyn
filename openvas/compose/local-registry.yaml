@@ -1,0 +1,48 @@
+name: greenbone-community-edition
+
+services:
+  auth_server:
+    image: docker.io/cesanta/docker_auth
+    container_name: auth_server
+    ports:
+      - "127.0.0.1:5001:5001"
+    volumes:
+      - ./local-registry:/config:ro,Z
+      - ${OPENVASD_CERTS:-./certs}:/certs:ro,z
+    restart: unless-stopped
+
+  registry:
+    image: docker.io/registry:2
+    container_name: registry
+    ports:
+      - "127.0.0.1:5000:5000"
+    volumes:
+      - ${OPENVASD_CERTS:-./certs}:/certs:ro,z
+    environment:
+      REGISTRY_AUTH: token
+      REGISTRY_HTTP_TLS_CERTIFICATE: /certs/server.pem
+      REGISTRY_HTTP_TLS_KEY: /certs/server.key
+      REGISTRY_AUTH_TOKEN_REALM: https://auth_server:5001/auth
+      REGISTRY_AUTH_TOKEN_SERVICE: registry:5000
+      REGISTRY_AUTH_TOKEN_ISSUER: MyAuthServer
+      REGISTRY_AUTH_TOKEN_ROOTCERTBUNDLE: /certs/server.pem
+    depends_on:
+      - auth_server
+    restart: unless-stopped
+
+  registry_seed:
+    build:
+      context: ./local-registry
+      dockerfile: skopeo.Dockerfile
+    depends_on:
+      - registry
+    environment:
+      REGISTRY: registry:5000
+      USERNAME: test
+      PASSWORD: test
+      IMAGES: >
+        docker.io/nichtsfrei/victim:latest
+        docker.io/openeuler/openeuler:latest
+        docker.io/openeuler/openeuler:24.03-lts-sp1
+        docker.io/openeuler/openeuler:20.03-lts-sp4
+    restart: "no"

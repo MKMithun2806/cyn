@@ -1,0 +1,153 @@
+pub(crate) mod docker_v2_registry;
+use std::fmt::Display;
+
+use futures::{Stream, StreamExt};
+
+pub(crate) use super::PackedLayer;
+
+#[derive(Clone, Debug)]
+pub struct Credential {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RegistryPreference {
+    /// Allows falling back to an insecure connection when HTTPS is unavailable
+    Insecure,
+    /// Allows the usage of invalid certificates
+    AcceptInvalidCerts,
+}
+
+impl RegistryPreference {
+    #[cfg(test)]
+    pub fn key(&self) -> &str {
+        match self {
+            RegistryPreference::Insecure => "registry_allow_insecure",
+            RegistryPreference::AcceptInvalidCerts => "accept_invalid_certs",
+        }
+    }
+}
+
+impl RegistryPreference {
+    pub(crate) fn parse_preference_entry(key: &str, value: &str) -> Option<RegistryPreference> {
+        match key {
+            "registry_allow_insecure" if value.parse().unwrap_or_default() => Some(Self::Insecure),
+            "accept_invalid_certs" if value.parse().unwrap_or_default() => {
+                Some(Self::AcceptInvalidCerts)
+            }
+            _ => None,
+        }
+    }
+
+    pub async fn parse_preferences(
+        preferences: impl Stream<Item = (String, String)>,
+    ) -> Vec<RegistryPreference> {
+        preferences
+            .filter_map(
+                |(k, v)| async move { Self::parse_preference_entry(k.as_ref(), v.as_ref()) },
+            )
+            .collect()
+            .await
+    }
+}
+
+#[derive(Debug)]
+pub enum InvalidData {
+    NoRepositoryInformation,
+    MissingTag,
+}
+
+impl Display for InvalidData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InvalidData::NoRepositoryInformation => {
+                f.write_str("No repository (image) information provided.")
+            }
+            InvalidData::MissingTag => f.write_str("Missing tag information."),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum RegistryErrorKind {
+    InvalidData(InvalidData),
+    Authentication { scope: String },
+    Catalog,
+    Tag,
+    Blob,
+    Manifest,
+}
+
+impl Display for RegistryErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RegistryErrorKind::Authentication { scope } => write!(f, "authentication ({scope})"),
+            RegistryErrorKind::Catalog => f.write_str("catalog"),
+            RegistryErrorKind::Tag => f.write_str("tag"),
+            RegistryErrorKind::Blob => f.write_str("blob"),
+            RegistryErrorKind::Manifest => f.write_str("manifest"),
+            RegistryErrorKind::InvalidData(invalid_data) => {
+                write!(f, "Invalid data provided: {invalid_data}")
+            }
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub struct RegistryError {
+    pub registry: Option<String>,
+    pub kind: RegistryErrorKind,
+    pub status_code: Option<u16>,
+}
+
+impl RegistryError {
+    pub fn invalid_data(id: InvalidData) -> Self {
+        Self {
+            registry: None,
+            kind: RegistryErrorKind::InvalidData(id),
+            status_code: None,
+        }
+    }
+
+    pub fn no_repository() -> RegistryError {
+        Self::invalid_data(InvalidData::NoRepositoryInformation)
+    }
+
+    pub fn no_tag() -> RegistryError {
+        Self::invalid_data(InvalidData::MissingTag)
+    }
+
+    pub fn needs_reauthentication(&self) -> bool {
+        self.status_code
+            .map(|x| x == 401 || x == 403)
+            .unwrap_or_default()
+    }
+
+    pub fn can_retry(&self) -> bool {
+        if let Some(sc) = self.status_code {
+            // on 500 we retry
+            sc > 499 && sc < 600 || self.needs_reauthentication()
+        } else {
+            // unfortunately we don't get a status code but a invalid body error back from the
+            // library, hence that special treatment.
+            matches!(self.kind, RegistryErrorKind::Blob)
+        }
+    }
+}
+
+impl Display for RegistryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let kind = &self.kind;
+        if let Some(registry) = self.registry.as_ref() {
+            let registry_msg = format!("Error occurred on {registry} while operating on {kind}");
+            if let Some(sc) = self.status_code {
+                write!(f, "{registry_msg}: unexpected status code ({sc})")
+            } else {
+                write!(f, "{registry_msg}")
+            }
+        } else {
+            todo!()
+        }
+    }
+}

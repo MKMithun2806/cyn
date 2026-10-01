@@ -1,0 +1,115 @@
+# Openvasd contains several modes to control the behavior of it.
+# Service enables nasl and notus feed observations all endpoints.
+mode = "service"
+# Notus disables /scan endpoints and just observes the notus feed.
+# mode = "service_notus"
+
+[feed]
+# Path to the openvas feed. This is required for the /vts endpoint.
+path = "/var/lib/openvas/plugins"
+# Directory in which openvasd creates feed-update.lock. must be writable. If
+# unset, the parent directory of `path` is used.
+# lock_file_dir = "/var/lib/openvas"
+# Disables or enables the signature check
+signature_check = true
+
+# How often the feed should be checked for updates
+check_interval = "3600s"
+
+[notus]
+# Path to the notus feed. This is required for the /notus endpoint
+products_path = "/var/lib/notus/products/"
+# path to the notus advisories feed. This is required for the /vts endpoint
+advisories_path = "/var/lib/notus/advisories/"
+# The URL to the Notus endpoint of a Skiron service
+# url = "http://127.0.0.1:8085/skiron/v2/api/scanNotus"
+
+[endpoints]
+# Enables GET /scans endpoint
+enable_get_scans = true
+# If set it requires `x-api-key` header to use the endpoint
+key = "mtls_is_preferred"
+
+[tls]
+# The server certificate
+certs = "/etc/openvasd/tls/server.pem"
+# Server key
+key = "/var/lib/openvasd/tls/server.rsa"
+# dir that contains client certificates. If there are none than every client is
+# allowed to connect otherwise just the clients that have the configured
+# client certificates.
+client_certs = "/etc/openvasd/tls/client"
+
+[scanner]
+# Supported types:
+#   "openvas": Current C based openvas-scanner
+#   "openvasd": New Rust based scanner which is not yet fully implemented
+type = "openvas"
+
+[listener]
+# ip address and port to listen to
+address = "127.0.0.1:3000"
+
+[logging]
+level = 'INFO'
+
+[logging.additional]
+# with that we can set other packages to be quieter
+sqlx = 'WARN'
+
+[storage]
+# The location can be either 'in-memory' or the path to a directory. If a
+# directory path is given, openvasd will create its SQLite database in it, so
+# the directory must be writable.
+location = 'in-memory'
+busy_timeout = '2s'
+max_connections = 1
+# credentials are stored encrypted. To set a manual key you can set credential_key
+credential_key = "verysecretive"
+
+[scheduler]
+# Sets the maximum number scans that can be queued at once. If not set, there is no limit.
+# max_queued_scans = 10
+# Sets the maximum number of scans that can run in parallel. If the maximum number is reached,
+# queued scans remain in the queue.  If not set, there is no limit.
+# max_running_scans = 10
+# Minimum memory that must be available in order to start a scan. If not set, there is no limit.
+# min_free_mem = 2147483648 # 2GiB
+
+# Iteration interval for the scheduler
+check_interval = "500ms"
+
+[container_image_scanner]
+# Defines how many scans can be resolved to images although another scan is running.
+#
+# This will effectively resolve whole catalogs or repositories in parallel, however it does
+# not mean that they will be actually scanned yet as those images are then picked up and
+# the concurrency of those are controlled by images.max_scanning.
+max_scans = 5
+
+[container_image_scanner.database]
+# The location can be either 'in-memory' or the path to a directory. If a
+# directory path is given, openvasd will create its container image scanning
+# SQLite database in it, so the directory must be writable.
+location = 'in-memory'
+busy_timeout = '2s'
+max_connections = 1
+
+[container_image_scanner.image]
+# Directory used to extract temporary image contents. Must be writable.
+extract_to = '/tmp/openvasd/cis'
+# How many times an image scan should be retried on a failure that is retryable
+scanning_retries = 10
+# Configures the amount of images that may be scanned concurrently
+# The recommended configuration of max_scanning and batch_size is:
+# 10:2 for a 1000mb/s
+# 25:2 for a 2500mb/s
+# 50:2 for a 5000mb/s
+# 100:2 for a 10000mb/s
+# Assuming a median size of 100mb per image.
+max_scanning = 10
+# Configures the amount of images that should be processed in one batch synchronously.
+# Additionally this controls the amount of seconds a loop checks if images can be scanned.
+batch_size = 2
+# How long openvasd should pause before retrying
+retry_timeout = "1s"

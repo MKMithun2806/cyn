@@ -1,5 +1,12 @@
 # Cyn
 
+## Vendored OpenVAS library
+
+The `openvas/` directory contains the OpenVAS scanner library vendored directly
+in this repository. It is intentionally tracked as a normal directory so Cyn
+can carry the local compatibility fixes it needs without depending on a
+separate submodule commit.
+
 [![CI](https://github.com/MKMithun2806/cyn/actions/workflows/ci.yml/badge.svg)](https://github.com/MKMithun2806/cyn/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange?logo=rust)](https://www.rust-lang.org/)
 [![License: GPL v2](https://img.shields.io/badge/License-GPL_v2-blue.svg)](https://www.gnu.org/licenses/old-licenses/gpl-2.0.html)

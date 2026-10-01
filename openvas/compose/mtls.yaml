@@ -1,0 +1,24 @@
+name: openvasd-community-edition-tls
+
+services:
+  configure-openvas:
+    image: ${OPENVAS_IMAGE:-ghcr.io/greenbone/openvas-scanner:stable}
+    volumes:
+      - openvas_data_vol:/mnt
+    environment:
+      OPENVASD_PROTOCOL: https
+      OPENVASD_PORT: 3000
+    command:
+      - /bin/sh
+      - -c
+      - |
+        printf "table_driven_lsc = yes\nopenvasd_server = $$OPENVASD_PROTOCOL://openvasd:$$OPENVASD_PORT\n" > /mnt/openvas.conf
+        chmod 644 /mnt/openvas.conf
+
+  openvasd:
+    environment:
+      TLS_CERTS: /var/lib/openvasd/certs/server.pem
+      TLS_KEY: /var/lib/openvasd/certs/server.key
+      TLS_CLIENT_CERTS: /var/lib/openvasd/certs/clients/
+    volumes:
+      - ${OPENVASD_CERTS:-./certs}:/var/lib/openvasd/certs:ro,z

@@ -1,0 +1,77 @@
+// SPDX-FileCopyrightText: 2024 Greenbone AG
+//
+// SPDX-License-Identifier: GPL-2.0-or-later WITH x11vnc-openssl-exception
+
+//! Contains builtin functions (i.e. the standard library of NASL).
+
+mod array;
+mod cert;
+mod cryptographic;
+mod description;
+mod error;
+mod find_service;
+mod host;
+mod http;
+mod isotime;
+mod knowledge_base;
+mod krb5;
+pub mod misc;
+pub mod network;
+mod notus;
+mod preferences;
+pub mod raw_ip;
+mod regex;
+mod report;
+mod snmp;
+mod ssh;
+mod string;
+mod sys;
+mod wmi;
+
+#[cfg(test)]
+mod tests;
+
+pub use error::BuiltinError;
+pub use host::HostError;
+pub use knowledge_base::KBError;
+
+use super::utils::Executor;
+
+pub use network::socket::NaslSockets;
+
+/// Creates a new Executor and adds all the functions to it.
+pub fn nasl_std_executor() -> Executor {
+    let mut executor = Executor::default();
+    executor
+        .add_set(array::Array)
+        .add_set(report::Reporting::default())
+        .add_set(knowledge_base::KnowledgeBase)
+        .add_set(misc::Misc)
+        .add_set(string::NaslString)
+        .add_set(host::Host)
+        .add_set(http::NaslHttp2::default())
+        .add_set(http::NaslHttp)
+        .add_set(network::socket::SocketFns)
+        .add_set(network::network::Network)
+        .add_set(regex::RegularExpressions)
+        .add_set(cryptographic::Cryptographic)
+        .add_set(description::Description)
+        .add_set(isotime::NaslIsotime)
+        .add_set(preferences::Preferences)
+        .add_set(cryptographic::rc4::CipherHandlers::default())
+        .add_set(sys::Sys)
+        .add_set(ssh::Ssh::default())
+        .add_set(find_service::FindService)
+        .add_set(wmi::Wmi)
+        .add_set(snmp::Snmp)
+        .add_set(cert::NaslCerts::default())
+        .add_set(notus::NaslNotus::default());
+
+    executor.add_set(krb5::Krb5::default());
+    executor.add_set(raw_ip::RawIp);
+    executor.add_global_vars(raw_ip::RawIp);
+    executor.add_global_vars(network::socket::SocketFns);
+    executor.add_global_vars(misc::Misc);
+
+    executor
+}

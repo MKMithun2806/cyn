@@ -1,0 +1,35 @@
+name: "Unit-Tests"
+
+on: [workflow_call]
+
+jobs:
+  C:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/greenbone/gvm-libs:stable
+    steps:
+      - uses: actions/checkout@v7
+      - name: install dependencies
+        run: |
+          sh .github/install-openvas-dependencies.sh
+      - name: unit-tests
+        run: ./check.sh --verbose test-c
+  Rust:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rust
+      - name: unit-tests
+        run: ../check.sh --verbose test-rust
+      - name: compose-tests
+        id: compose_tests
+        run: ../check.sh --verbose test-rust-compose
+      - name: compose-test-logs
+        if: failure() && steps.compose_tests.outcome == 'failure'
+        run: cd ../compose && make rust-test-environment-logs
+      - name: compose-test-cleanup
+        if: always() && steps.compose_tests.outcome != 'skipped'
+        run: cd ../compose && make rust-test-environment-down

@@ -1,0 +1,34 @@
+name: "Build"
+
+on:
+  workflow_call:
+    inputs:
+      binary_version:
+        description: "Binary version"
+        required: false
+        type: string
+
+jobs:
+  C:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/greenbone/gvm-libs:stable
+    steps:
+      - uses: actions/checkout@v7
+      - name: install dependencies
+        run: |
+          sh .github/install-openvas-dependencies.sh
+      - name: build 
+        run: ./check.sh --verbose ci-build-c
+  rs-amd64:
+    uses: ./.github/workflows/build-rs.yaml
+    with:
+      arch: amd64
+      runner: ubuntu-latest
+      binary_version: ${{ inputs.binary_version }}
+  rs-arm64:
+    uses: ./.github/workflows/build-rs.yaml
+    with:
+      arch: arm64
+      runner: self-hosted-generic-arm64
+      binary_version: ${{ inputs.binary_version }}

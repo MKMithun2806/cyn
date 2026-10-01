@@ -1,0 +1,186 @@
+// SPDX-FileCopyrightText: 2025 Greenbone AG
+//
+// SPDX-License-Identifier: GPL-2.0-or-later WITH x11vnc-openssl-exception
+
+use std::sync::{Arc, RwLock};
+
+use crate::models::{self, Protocol, ResultType};
+
+use crate::nasl::prelude::*;
+
+#[cfg(test)]
+mod tests;
+
+#[derive(Debug, Clone, Default)]
+/// The description builtin function
+pub struct Reporting {
+    id: Arc<RwLock<usize>>,
+}
+
+impl Reporting {
+    fn id(&self) -> usize {
+        let mut id = self.id.as_ref().write().expect("expected write lock");
+        let result = *id;
+        *id += 1;
+        result
+    }
+
+    async fn store_result(
+        &self,
+        typus: ResultType,
+        register: &Register,
+        ctx: &ScanCtx<'_>,
+        script_ctx: &ScriptCtx<'_>,
+    ) -> Result<NaslValue, FnError> {
+        let data = register
+            .local_nasl_value("data")
+            .ok()
+            .map(|x| x.to_string());
+        let port = register
+            .local_nasl_value("port")
+            .ok()
+            .map(|x| x.convert_to_number())
+            .map(|x: i64| x as i16);
+
+        let protocol = match register
+            .local_nasl_value("proto")
+            .ok()
+            .map(|x| x.to_string())
+            .as_ref()
+            .map(|x| x as &str)
+        {
+            Some("udp") => Protocol::UDP,
+            _ => Protocol::TCP,
+        };
+        let target = script_ctx.target();
+        let hostname = target.hostname();
+        let ip_address = target.ip_addr();
+        //TODO: rename models::Result to allow direct import
+        let result = models::Result {
+            id: self.id(),
+            r_type: typus,
+            ip_address: Some(ip_address.to_string()),
+            hostname,
+            oid: Some(script_ctx.vt().oid.clone()),
+            port,
+            protocol: Some(protocol),
+            message: data,
+            detail: None,
+        };
+        ctx.storage()
+            .retry_dispatch(ctx.scan().clone(), result, 5)
+            .await?;
+        Ok(NaslValue::Null)
+    }
+
+    /// *void* **log_message**(data: *string*, port:*int* , proto: *string*, uri: *string*);
+    ///
+    /// Creates a log result based on the given arguments
+    /// - data, is the text report
+    /// - port, optional TCP or UDP port number of the service
+    /// - proto is the protocol ("tcp" by default; "udp" is the other value).
+    /// - uri specifies the location of a found product
+    #[nasl_function]
+    async fn log_message(
+        &self,
+        register: &Register,
+        ctx: &ScanCtx<'_>,
+        script_ctx: &ScriptCtx<'_>,
+    ) -> Result<NaslValue, FnError> {
+        self.store_result(ResultType::Log, register, ctx, script_ctx)
+            .await
+    }
+
+    /// *void* **security_message**(data: *string*, port:*int* , proto: *string*, uri: *string*);
+    ///
+    /// Creates a alarm result based on the given arguments
+    /// - data, is the text report
+    /// - port, optional TCP or UDP port number of the service
+    /// - proto is the protocol ("tcp" by default; "udp" is the other value).
+    /// - uri specifies the location of a found product
+    #[nasl_function]
+    async fn security_message(
+        &self,
+        register: &Register,
+        ctx: &ScanCtx<'_>,
+        script_ctx: &ScriptCtx<'_>,
+    ) -> Result<NaslValue, FnError> {
+        self.store_result(ResultType::Alarm, register, ctx, script_ctx)
+            .await
+    }
+
+    /// *void* **error_message**(data: *string*, port:*int* , proto: *string*, uri: *string*);
+    ///
+    /// Creates a error result based on the given arguments
+    /// - data, is the text report
+    /// - port, optional TCP or UDP port number of the service
+    /// - proto is the protocol ("tcp" by default; "udp" is the other value).
+    /// - uri specifies the location of a found product
+    #[nasl_function]
+    async fn error_message(
+        &self,
+        register: &Register,
+        ctx: &ScanCtx<'_>,
+        script_ctx: &ScriptCtx<'_>,
+    ) -> Result<NaslValue, FnError> {
+        self.store_result(ResultType::Error, register, ctx, script_ctx)
+            .await
+    }
+
+    #[nasl_function(named(result))]
+    async fn security_notus(
+        &self,
+        ctx: &ScanCtx<'_>,
+        script_ctx: &ScriptCtx<'_>,
+        result: NaslValue,
+    ) -> Result<(), FnError> {
+        match result {
+            NaslValue::Dict(dict) => {
+                if let (Some(NaslValue::String(oid)), Some(NaslValue::String(message))) =
+                    (dict.get("oid"), dict.get("message"))
+                {
+                    let result = models::Result {
+                        id: self.id(),
+                        r_type: ResultType::Alarm,
+                        ip_address: Some(script_ctx.target().ip_addr().to_string()),
+                        hostname: None,
+                        oid: Some(oid.to_owned()),
+                        port: None,
+                        protocol: None, // TODO: This field is set to "package" in the c scanner result
+                        message: Some(message.to_owned()),
+                        detail: None,
+                    };
+                    ctx.storage()
+                        .retry_dispatch(ctx.scan().clone(), result, 5)
+                        .await?;
+                } else {
+                    return Err(ArgumentError::wrong_argument(
+                        "result",
+                        "Dict with 'oid' and 'message' as String values",
+                        &format!("{:?}", dict),
+                    )
+                    .into());
+                }
+                Ok(())
+            }
+            x => {
+                return Err(ArgumentError::wrong_argument(
+                    "result",
+                    "Dict with 'oid' and 'message' as String values",
+                    &format!("{:?}", x),
+                )
+                .into());
+            }
+        }
+    }
+}
+
+function_set! {
+    Reporting,
+    (
+        (Reporting::log_message, "log_message"),
+        (Reporting::security_message, "security_message"),
+        (Reporting::error_message, "error_message"),
+        (Reporting::security_notus, "security_notus"),
+    )
+}

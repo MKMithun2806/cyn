@@ -1,3 +1,0 @@
-[submodule "openvas"]
-	path = openvas
-	url = https://github.com/greenbone/openvas-scanner.git

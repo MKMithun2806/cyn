@@ -1,0 +1,206 @@
+// SPDX-FileCopyrightText: 2024 Greenbone AG
+//
+// SPDX-License-Identifier: GPL-2.0-or-later WITH x11vnc-openssl-exception
+
+use crate::models::{self, Scan, Status};
+use crate::utils::scanner_types::ScannerType;
+use async_trait::async_trait;
+use thiserror::Error;
+
+/// ScanResults can differ in kind.
+///
+/// For an example OSPD scanner includes all information of the status therefore we need to
+/// override the status information based on that.  while on OpenVAS scanner the status just
+/// contains the current information, therefore the status has to be updated.
+pub enum ScanResultKind {
+    /// The status must be overridden on append_fetch_results
+    StatusOverride,
+    /// The status must be updated on append_fetch_results
+    StatusAddition,
+}
+
+/// Contains results of a scan as well as identification factors and statuses.
+///
+/// It is usually returned on fetch_results which gets all results of all running scans for further
+/// processing.
+#[derive(Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ScanResults {
+    pub id: String,
+    pub status: Status,
+    pub results: Vec<models::Result>,
+}
+
+#[async_trait]
+pub trait Scanner {
+    fn scanner_type(&self) -> ScannerType;
+
+    async fn start_scan(&self, scan: Scan) -> Result<(), Error>;
+
+    async fn can_start_scan(&self) -> bool {
+        true
+    }
+
+    async fn stop_scan<I>(&self, id: I) -> Result<(), Error>
+    where
+        I: AsRef<str> + Send + 'static;
+
+    async fn delete_scan<I>(&self, id: I) -> Result<(), Error>
+    where
+        I: AsRef<str> + Send + 'static;
+
+    /// Fetches the results of a scan and combines the results with response
+    async fn fetch_results<I>(&self, id: I) -> Result<ScanResults, Error>
+    where
+        I: AsRef<str> + Send + 'static;
+
+    fn scan_result_status_kind(&self) -> ScanResultKind {
+        ScanResultKind::StatusOverride
+    }
+}
+
+/// This is a scanner implementation for testing purposes.
+/// It holds a callback for every operation to make it easy
+/// to insert custom behavior.
+///
+/// This is not gated behind #[cfg(test)] because it is used
+/// in some tests in the binary crate `openvasd`.
+#[allow(clippy::complexity)]
+pub struct TestScanner {
+    start: Box<dyn Fn(Scan) -> Result<(), Error> + Sync + Send + 'static>,
+    stop: Box<dyn Fn(&str) -> Result<(), Error> + Sync + Send + 'static>,
+    delete: Box<dyn Fn(&str) -> Result<(), Error> + Sync + Send + 'static>,
+    fetch: Box<dyn Fn(&str) -> Result<ScanResults, Error> + Sync + Send + 'static>,
+    can_start: Box<dyn Fn() -> bool + Sync + Send + 'static>,
+}
+
+impl Default for TestScanner {
+    fn default() -> Self {
+        Self {
+            start: Box::new(|_| Ok(())),
+            stop: Box::new(|_| Ok(())),
+            delete: Box::new(|_| Ok(())),
+            fetch: Box::new(|_| Ok(ScanResults::default())),
+            can_start: Box::new(|| true),
+        }
+    }
+}
+
+pub struct TestScannerBuilder {
+    lambda: TestScanner,
+}
+
+impl Default for TestScannerBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TestScannerBuilder {
+    pub fn new() -> Self {
+        Self {
+            lambda: TestScanner::default(),
+        }
+    }
+    pub fn with_start<F>(mut self, f: F) -> Self
+    where
+        F: Fn(Scan) -> Result<(), Error> + Sync + Send + 'static,
+    {
+        self.lambda.start = Box::new(f);
+        self
+    }
+    pub fn with_fetch<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&str) -> Result<ScanResults, Error> + Sync + Send + 'static,
+    {
+        self.lambda.fetch = Box::new(f);
+        self
+    }
+
+    pub fn with_can_start<F>(mut self, f: F) -> Self
+    where
+        F: Fn() -> bool + Sync + Send + 'static,
+    {
+        self.lambda.can_start = Box::new(f);
+        self
+    }
+
+    pub fn build(self) -> TestScanner {
+        self.lambda
+    }
+}
+
+#[async_trait]
+impl Scanner for TestScanner {
+    fn scanner_type(&self) -> ScannerType {
+        ScannerType::Lambda
+    }
+
+    async fn start_scan(&self, scan: Scan) -> Result<(), Error> {
+        (self.start)(scan)
+    }
+
+    async fn can_start_scan(&self) -> bool {
+        (self.can_start)()
+    }
+
+    async fn stop_scan<I>(&self, id: I) -> Result<(), Error>
+    where
+        I: AsRef<str> + Send + 'static,
+    {
+        (self.stop)(id.as_ref())
+    }
+
+    async fn delete_scan<I>(&self, id: I) -> Result<(), Error>
+    where
+        I: AsRef<str> + Send + 'static,
+    {
+        (self.delete)(id.as_ref())
+    }
+
+    async fn fetch_results<I>(&self, id: I) -> Result<ScanResults, Error>
+    where
+        I: AsRef<str> + Send + 'static,
+    {
+        (self.fetch)(id.as_ref())
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ObservableResources {
+    CPU,
+    Memory,
+    IO,
+}
+
+impl std::fmt::Display for ObservableResources {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CPU => write!(f, "CPU"),
+            Self::Memory => write!(f, "Memory"),
+            Self::IO => write!(f, "IO"),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Error)]
+pub enum Error {
+    #[error("Unexpected issue: {0}")]
+    Unexpected(String),
+    #[error("Connection issue: {0}")]
+    Connection(String),
+    #[error("Not enough resources of types: {}", display_resources(.0))]
+    InsufficientResources(Vec<ObservableResources>),
+    #[error("Poisoned")]
+    Poisoned,
+    #[error("Scan not found: {0}")]
+    ScanNotFound(String),
+    #[error("Unable to schedule scan {id}: {reason}")]
+    SchedulingError { id: String, reason: String },
+}
+
+fn display_resources(v: &[ObservableResources]) -> String {
+    v.iter()
+        .map(|x| x.to_string())
+        .collect::<Vec<String>>()
+        .join(",")
+}
