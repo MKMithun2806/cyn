@@ -22,10 +22,13 @@ async fn main() {
 
     let quiet = matches!(&cli.command, Command::Scan { quiet, .. } if *quiet);
 
+    // Scans can execute tens of thousands of VTs. Keep normal output focused on
+    // scan progress and findings; users can opt into the full diagnostic stream
+    // with RUST_LOG=info when investigating a scan.
     let filter = if quiet {
-        EnvFilter::new("warn")
+        EnvFilter::new("error")
     } else {
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("error"))
     };
 
     tracing_subscriber::fmt()

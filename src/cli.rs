@@ -57,7 +57,7 @@ pub enum Command {
         #[arg(long)]
         exclude: Option<String>,
 
-        /// Suppress informational warnings (e.g., UTF-8 fallback messages)
+        /// Suppress diagnostic logging (errors are still shown)
         #[arg(long, short = 'q')]
         quiet: bool,
 
