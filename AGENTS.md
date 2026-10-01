@@ -32,7 +32,8 @@ src/
   feed.rs       - Feed status and update
 ```
 
-The Rust library is a git submodule at `openvas/rust/` (pinned to `v23.50.24`).
+The Rust library is vendored in this repository at `openvas/rust/` (based on
+`v23.50.24`). Local compatibility changes are committed directly here.
 
 ```
 openvas/rust/
@@ -102,11 +103,11 @@ cyn feed status
 - `reqwest` with `rustls-no-provider` feature
 - `install_default()` called at process startup in `main.rs`
 
-### 3. KB context key mismatch fix (in submodule)
+### 3. KB context key mismatch fix (in vendored OpenVAS code)
 - `VTRunner::generate_key()` in `vt_runner.rs` uses `self.target.ip_addr().to_string()`
 - `ScanCtx::kb_key()` in `scan_ctx.rs` uses `ip_addr().to_string()`
 - Previously `generate_key()` used `original_target_str()` which differs for hostnames
-- Fix committed locally in `openvas/` submodule (`24b5d37`), not pushable upstream
+- Fix maintained locally in the vendored `openvas/` source
 
 ### 4. VT pre-filtering (95K → 32K VTs)
 - Port-based: skip VTs whose `required_ports` don't match open ports
@@ -142,10 +143,9 @@ Last scan of pentest-ground.xml produced 17 Log-type results (hostname, OS detec
 - VTs may need dependency chains that aren't fully satisfied
 - The KB key fix (item 3 above) should help but needs verification with a fresh scan
 
-### Submodule can't push upstream
-The `openvas/` submodule has 2 local commits that can't be pushed to Greenbone's repo:
-- `ac4064c` — rustls ring-only fix
-- `24b5d37` — KB context key fix
+### Vendored OpenVAS source
+The `openvas/` source is intentionally tracked directly in this repository so
+local compatibility fixes remain versioned with Cyn.
 
 ## What To Do Next
 
