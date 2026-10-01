@@ -140,7 +140,7 @@ async fn run(cli: Cli) -> Result<(), error::CynError> {
 
             let findings = scanner::run_scan(&config, &request, &open_ports).await?;
 
-            output::print_scan_complete(findings.len());
+            output::print_scan_complete(&findings);
             output::output_findings(&findings, format)?;
 
             // Generate report file if requested

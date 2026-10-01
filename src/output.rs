@@ -2,6 +2,7 @@ use crate::cli::OutputFormat;
 use crate::error::CynError;
 use crate::feed::FeedInfo;
 use crate::scanner::Finding;
+use std::collections::HashSet;
 
 /// Print feed status to the terminal.
 pub fn print_feed_status(info: &FeedInfo) {
@@ -24,14 +25,41 @@ pub fn output_findings(findings: &[Finding], format: OutputFormat) -> Result<(),
 }
 
 fn print_findings_terminal(findings: &[Finding]) -> Result<(), CynError> {
-    if findings.is_empty() {
-        println!("No vulnerability findings.");
+    let actionable: Vec<&Finding> = findings
+        .iter()
+        .filter(|finding| finding.result_type == "Alarm" || finding.result_type == "Error")
+        .collect();
+
+    if actionable.is_empty() {
+        println!("No vulnerabilities found.");
+        if !findings.is_empty() {
+            println!(
+                "{} informational result(s) hidden; use --output json to inspect them.",
+                findings.len()
+            );
+        }
         return Ok(());
     }
 
-    println!("\n=== Findings ({}) ===\n", findings.len());
+    let mut seen = HashSet::new();
+    let unique: Vec<&Finding> = actionable
+        .into_iter()
+        .filter(|finding| {
+            let key = format!(
+                "{}|{}|{}|{}|{}",
+                finding.result_type,
+                finding.host,
+                finding.port.unwrap_or_default(),
+                finding.oid,
+                finding.description.as_deref().unwrap_or_default()
+            );
+            seen.insert(key)
+        })
+        .collect();
 
-    for (i, f) in findings.iter().enumerate() {
+    println!("\n=== Findings ({}) ===\n", unique.len());
+
+    for (i, f) in unique.iter().enumerate() {
         let severity = f
             .severity
             .map(|s| format!("{s:.1}"))
@@ -76,6 +104,21 @@ pub fn print_scan_start(target: &str) {
     println!("Starting scan against {target}...");
 }
 
-pub fn print_scan_complete(count: usize) {
-    println!("Scan complete. {count} finding(s) collected.");
+pub fn print_scan_complete(findings: &[Finding]) {
+    let vulnerabilities = findings
+        .iter()
+        .filter(|finding| finding.result_type == "Alarm")
+        .count();
+    let errors = findings
+        .iter()
+        .filter(|finding| finding.result_type == "Error")
+        .count();
+    let informational = findings
+        .iter()
+        .filter(|finding| finding.result_type == "Log")
+        .count();
+
+    println!(
+        "Scan complete: {vulnerabilities} vulnerability(s), {errors} error(s), {informational} informational result(s)."
+    );
 }
