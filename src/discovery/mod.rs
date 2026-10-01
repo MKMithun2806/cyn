@@ -2,7 +2,7 @@ mod nmap;
 mod types;
 
 pub use nmap::NmapBackend;
-pub use types::{DiscoveryResult, Protocol};
+pub use types::{DiscoveredHost, DiscoveredService, DiscoveryResult, Protocol};
 
 use std::fmt;
 

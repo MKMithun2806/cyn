@@ -3,6 +3,7 @@ mod config;
 mod discovery;
 mod error;
 mod feed;
+mod fingerprint;
 mod nmap;
 mod output;
 mod report;
@@ -96,7 +97,7 @@ async fn run(cli: Cli) -> Result<(), error::CynError> {
 
             // Resolve ports: an imported Nmap report takes precedence. Otherwise
             // discovery runs automatically, with --ports constraining Nmap.
-            let discovery = if let Some(ref nmap_path) = nmap {
+            let mut discovery = if let Some(ref nmap_path) = nmap {
                 let scan =
                     nmap::NmapScan::from_file(nmap_path).map_err(error::CynError::Scanner)?;
                 discovery::from_nmap(scan)
@@ -110,6 +111,7 @@ async fn run(cli: Cli) -> Result<(), error::CynError> {
                     .map_err(|error| error::CynError::Scanner(error.to_string()))?
             };
 
+            fingerprint::enrich(&mut discovery).await;
             let open_ports = discovery.open_tcp_ports();
             if open_ports.is_empty() {
                 let source = nmap

@@ -18,7 +18,7 @@ futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "fs", "io-util"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "fs", "io-util", "net", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 quick-xml = "0.37"

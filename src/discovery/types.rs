@@ -15,6 +15,7 @@ pub struct DiscoveredService {
     pub product: Option<String>,
     pub version: Option<String>,
     pub cpe: Vec<String>,
+    pub fingerprint: Option<crate::fingerprint::ServiceFingerprint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -76,6 +77,7 @@ impl From<crate::nmap::NmapScan> for DiscoveryResult {
                             product: port.product,
                             version: port.version,
                             cpe: port.cpes,
+                            fingerprint: None,
                         })
                         .collect(),
                 })
@@ -104,6 +106,7 @@ mod tests {
                         product: None,
                         version: None,
                         cpe: vec![],
+                        fingerprint: None,
                     },
                     DiscoveredService {
                         port: 22,
@@ -112,6 +115,7 @@ mod tests {
                         product: None,
                         version: None,
                         cpe: vec![],
+                        fingerprint: None,
                     },
                     DiscoveredService {
                         port: 53,
@@ -120,6 +124,7 @@ mod tests {
                         product: None,
                         version: None,
                         cpe: vec![],
+                        fingerprint: None,
                     },
                 ],
             }],
