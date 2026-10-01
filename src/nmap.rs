@@ -9,12 +9,17 @@ pub struct NmapPort {
     pub protocol: String,
     pub state: String,
     pub service: String,
+    pub product: Option<String>,
+    pub version: Option<String>,
+    pub cpes: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct NmapHost {
     pub addr: String,
     pub ports: Vec<NmapPort>,
+    pub hostname: Option<String>,
+    pub os: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -42,6 +47,7 @@ impl NmapScan {
         let mut buf = Vec::new();
         let mut current_host: Option<NmapHost> = None;
         let mut current_port: Option<NmapPort> = None;
+        let mut current_cpe = false;
 
         loop {
             match reader.read_event_into(&mut buf) {
@@ -52,6 +58,8 @@ impl NmapScan {
                             current_host = Some(NmapHost {
                                 addr: String::new(),
                                 ports: vec![],
+                                hostname: None,
+                                os: None,
                             });
                         }
                         "address" => {
@@ -71,6 +79,9 @@ impl NmapScan {
                                 protocol: proto,
                                 state: String::new(),
                                 service: String::new(),
+                                product: None,
+                                version: None,
+                                cpes: vec![],
                             });
                         }
                         "state" => {
@@ -81,6 +92,26 @@ impl NmapScan {
                         "service" => {
                             if let Some(ref mut p) = current_port {
                                 p.service = extract_attr(&e, b"name").unwrap_or_default();
+                                p.product = extract_attr(&e, b"product");
+                                p.version = extract_attr(&e, b"version");
+                            }
+                        }
+                        "hostname" => {
+                            if let Some(ref mut host) = current_host {
+                                host.hostname = extract_attr(&e, b"name");
+                            }
+                        }
+                        "osmatch" => {
+                            if let Some(ref mut host) = current_host {
+                                host.os = extract_attr(&e, b"name");
+                            }
+                        }
+                        "cpe" => {
+                            current_cpe = true;
+                            if let Some(value) = extract_attr(&e, b"name") {
+                                if let Some(ref mut p) = current_port {
+                                    p.cpes.push(value);
+                                }
                             }
                         }
                         _ => {}
@@ -96,12 +127,21 @@ impl NmapScan {
                                 host.ports.push(port);
                             }
                         }
+                        "cpe" => current_cpe = false,
                         "host" => {
                             if let Some(host) = current_host.take() {
                                 scan.hosts.push(host);
                             }
                         }
                         _ => {}
+                    }
+                }
+                Ok(Event::Text(e)) if current_cpe => {
+                    if let Some(ref mut p) = current_port {
+                        let value = String::from_utf8_lossy(e.as_ref()).trim().to_string();
+                        if !value.is_empty() {
+                            p.cpes.push(value);
+                        }
                     }
                 }
                 Ok(Event::Eof) => break,
@@ -115,6 +155,7 @@ impl NmapScan {
     }
 
     /// Extract unique TCP ports from all hosts that are in "open" state
+    #[allow(dead_code)]
     pub fn open_tcp_ports(&self) -> Vec<u16> {
         let mut ports: Vec<u16> = self
             .hosts
@@ -140,7 +181,9 @@ mod tests {
     <ports>
       <port protocol="tcp" portid="22">
         <state state="open" reason="syn-ack"/>
-        <service name="ssh" product="OpenSSH"/>
+        <service name="ssh" product="OpenSSH" version="9.6p1">
+          <cpe>cpe:/a:openbsd:openssh:9.6</cpe>
+        </service>
       </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack"/>
@@ -151,6 +194,9 @@ mod tests {
         <service name="https"/>
       </port>
     </ports>
+    <os>
+      <osmatch name="Linux 6.x" accuracy="98"/>
+    </os>
   </host>
 </nmaprun>"#;
 
@@ -160,6 +206,13 @@ mod tests {
         assert_eq!(scan.hosts.len(), 1);
         assert_eq!(scan.hosts[0].addr, "192.168.1.1");
         assert_eq!(scan.hosts[0].ports.len(), 3);
+        assert_eq!(scan.hosts[0].os.as_deref(), Some("Linux 6.x"));
+        assert_eq!(scan.hosts[0].ports[0].product.as_deref(), Some("OpenSSH"));
+        assert_eq!(scan.hosts[0].ports[0].version.as_deref(), Some("9.6p1"));
+        assert_eq!(
+            scan.hosts[0].ports[0].cpes,
+            vec!["cpe:/a:openbsd:openssh:9.6"]
+        );
     }
 
     #[test]
