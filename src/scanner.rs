@@ -11,7 +11,7 @@ use scannerlib::feed::{HashSumNameLoader, Update};
 use scannerlib::models;
 use scannerlib::nasl::nasl_std_executor;
 use scannerlib::nasl::syntax::Loader;
-use scannerlib::nasl::utils::scan_ctx::Target;
+use scannerlib::nasl::utils::ctx::{CtxTarget, CtxTargets, ScanCtx, TargetId};
 use scannerlib::scanner::{Scan, ScanRunner};
 use scannerlib::scheduling::Scheduler;
 use scannerlib::storage::inmemory::InMemoryStorage;
@@ -46,7 +46,11 @@ pub struct ScanRequest {
     pub exclude_hosts: Option<Vec<String>>,
 }
 
-pub async fn run_scan(config: &Config, request: &ScanRequest, open_ports: &[u16]) -> Result<Vec<Finding>, CynError> {
+pub async fn run_scan(
+    config: &Config,
+    request: &ScanRequest,
+    open_ports: &[u16],
+) -> Result<Vec<Finding>, CynError> {
     let feed_path = &config.feed_path;
 
     if !feed_path.exists() {
@@ -75,13 +79,18 @@ pub async fn run_scan(config: &Config, request: &ScanRequest, open_ports: &[u16]
     let models_scan = build_scan_model(request, vts)?;
     let scan_id = models_scan.scan_id.clone();
     let scan = Scan::default_to_localhost(models_scan);
-    eprintln!("  [3/6] Scan model built: {} host(s), {} VT(s)", scan.targets.len(), scan.vts.len());
+    let target_count = scan.targets.iter().count();
+    eprintln!(
+        "  [3/6] Scan model built: {} host(s), {} VT(s)",
+        target_count,
+        scan.vts.len()
+    );
 
-    let capacity = scan.targets.len().max(1);
-    let (tx_target, rx_target) = mpsc::channel::<Target>(capacity);
+    let capacity = target_count.max(1);
+    let (tx_target, rx_target) = mpsc::channel::<TargetId>(capacity);
 
-    for target in &scan.targets {
-        if tx_target.send(target.clone()).await.is_err() {
+    for (target_id, _) in scan.targets.enumerate() {
+        if tx_target.send(target_id).await.is_err() {
             break;
         }
     }
@@ -99,14 +108,28 @@ pub async fn run_scan(config: &Config, request: &ScanRequest, open_ports: &[u16]
 
     tracing::info!(
         "scan started: {} target(s), {} VTs",
-        scan.targets.len(),
+        target_count,
         scan.vts.len()
     );
 
-    let runner: ScanRunner<Arc<InMemoryStorage>> = ScanRunner::new(
-        &storage, &loader, &executor, schedule, &scan, &None, rx_target,
-    )
-    .map_err(|e| CynError::Scanner(format!("failed to create scan runner: {e}")))?;
+    let targets: CtxTargets = scan
+        .targets
+        .iter()
+        .map(|target| CtxTarget::new(target.clone(), scan.ports.clone()))
+        .collect();
+    let scan_ctx = ScanCtx::new(
+        ScanID(scan_id.clone()),
+        targets,
+        &*storage,
+        &loader,
+        &executor,
+        scan.scan_preferences.clone(),
+        scan.alive_test_methods.clone(),
+        None,
+    );
+
+    let runner = ScanRunner::new(schedule, rx_target, &scan_ctx)
+        .map_err(|e| CynError::Scanner(format!("failed to create scan runner: {e}")))?;
 
     eprintln!("  [6/6] Executing scan...");
     let mut succeeded = 0u32;
@@ -220,10 +243,8 @@ async fn load_vts(
 
             match all_vts {
                 Some(vts) => {
-                    let open_port_set: std::collections::HashSet<String> = open_ports
-                        .iter()
-                        .map(|p| p.to_string())
-                        .collect();
+                    let open_port_set: std::collections::HashSet<String> =
+                        open_ports.iter().map(|p| p.to_string()).collect();
 
                     let mut kept = 0u32;
                     let mut skipped_port = 0u32;
@@ -269,7 +290,8 @@ async fn load_vts(
                                         return false;
                                     }
                                     // If VT has no port requirements, keep it
-                                    if data.required_ports.is_empty() && data.required_udp_ports.is_empty()
+                                    if data.required_ports.is_empty()
+                                        && data.required_udp_ports.is_empty()
                                     {
                                         kept += 1;
                                         return true;
