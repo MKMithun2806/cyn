@@ -12,7 +12,7 @@ pub fn generate_csv(findings: &[Finding]) -> String {
     let mut w = Vec::new();
     writeln!(
         w,
-        "host,port,protocol,oid,name,severity,cves,solution,references,result_type"
+        "host,port,protocol,oid,name,severity,cves,solution,references,result_type,service,product,version,evidence,detection_reason,source"
     )
     .unwrap();
 
@@ -25,11 +25,38 @@ pub fn generate_csv(findings: &[Finding]) -> String {
         let references = f.references.join(";");
         let name = f.name.replace('"', "\"\"");
         let oid = f.oid.replace('"', "\"\"");
+        let service = f.service.as_deref().unwrap_or("");
+        let product = f.product.as_deref().unwrap_or("");
+        let version = f.version.as_deref().unwrap_or("");
+        let evidence = f
+            .evidence
+            .iter()
+            .map(|item| format!("{}:{}", item.kind, item.value))
+            .collect::<Vec<_>>()
+            .join(";")
+            .replace('"', "\"\"");
+        let detection_reason = f.detection_reason.as_deref().unwrap_or("");
+        let source = f.source.as_deref().unwrap_or("");
 
         writeln!(
             w,
-            "\"{}\",{},{},\"{}\",\"{}\",{},\"{}\",\"{}\",\"{}\",{}",
-            f.host, port, protocol, oid, name, severity, cves, solution, references, f.result_type
+            "\"{}\",{},{},\"{}\",\"{}\",{},\"{}\",\"{}\",\"{}\",{},\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"",
+            f.host,
+            port,
+            protocol,
+            oid,
+            name,
+            severity,
+            cves,
+            solution,
+            references,
+            f.result_type,
+            service,
+            product,
+            version,
+            evidence,
+            detection_reason,
+            source
         )
         .unwrap();
     }
@@ -71,6 +98,7 @@ pub fn load_findings(path: &Path) -> Result<Vec<Finding>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scanner::Evidence;
 
     fn sample_findings() -> Vec<Finding> {
         vec![
@@ -86,6 +114,13 @@ mod tests {
                 solution: None,
                 references: vec![],
                 result_type: "Log".into(),
+                service: None,
+                product: None,
+                version: None,
+                cpe: vec![],
+                evidence: vec![],
+                detection_reason: None,
+                source: None,
             },
             Finding {
                 host: "192.168.1.1".into(),
@@ -99,6 +134,17 @@ mod tests {
                 solution: Some("Update TLS".into()),
                 references: vec!["cve:CVE-2024-1234".into()],
                 result_type: "Alarm".into(),
+                service: None,
+                product: None,
+                version: None,
+                cpe: vec![],
+                evidence: vec![Evidence {
+                    kind: "banner".into(),
+                    source: "fingerprint".into(),
+                    value: "nginx/1.24.0".into(),
+                }],
+                detection_reason: None,
+                source: None,
             },
         ]
     }
@@ -111,6 +157,7 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].host, "192.168.1.1");
         assert_eq!(parsed[1].severity, Some(7.5));
+        assert_eq!(parsed[1].evidence[0].value, "nginx/1.24.0");
     }
 
     #[test]
@@ -138,8 +185,23 @@ mod tests {
             solution: Some("Fix it".into()),
             references: vec![],
             result_type: "Alarm".into(),
+            service: None,
+            product: None,
+            version: None,
+            cpe: vec![],
+            evidence: vec![],
+            detection_reason: None,
+            source: None,
         }];
         let csv = generate_csv(&findings);
         assert!(csv.contains("\"Test \"\"quoted\"\" value\""));
+    }
+
+    #[test]
+    fn loads_legacy_findings_without_evidence_fields() {
+        let legacy = r#"[{"host":"192.0.2.1","port":22,"protocol":"tcp","oid":"1.2.3","name":"legacy","severity":null,"cves":[],"description":null,"solution":null,"references":[],"result_type":"Log"}]"#;
+        let findings: Vec<Finding> = serde_json::from_str(legacy).unwrap();
+        assert!(findings[0].evidence.is_empty());
+        assert!(findings[0].service.is_none());
     }
 }

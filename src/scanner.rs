@@ -5,7 +5,7 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 
 use crate::config::Config;
-use crate::discovery::DiscoveryResult;
+use crate::discovery::{DiscoveryResult, Protocol};
 use crate::error::CynError;
 use crate::selection::{select_vts, SelectionContext};
 
@@ -37,6 +37,27 @@ pub struct Finding {
     pub solution: Option<String>,
     pub references: Vec<String>,
     pub result_type: String,
+    #[serde(default)]
+    pub service: Option<String>,
+    #[serde(default)]
+    pub product: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub cpe: Vec<String>,
+    #[serde(default)]
+    pub evidence: Vec<Evidence>,
+    #[serde(default)]
+    pub detection_reason: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct Evidence {
+    pub kind: String,
+    pub source: String,
+    pub value: String,
 }
 
 pub struct ScanRequest {
@@ -186,7 +207,7 @@ pub async fn run_scan(
 
     let findings: Vec<Finding> = raw_results
         .into_iter()
-        .filter_map(|r| result_to_finding(r, &vt_metadata))
+        .filter_map(|r| result_to_finding(r, &vt_metadata, request.discovery.as_ref()))
         .collect();
 
     tracing::info!("findings after conversion: {}", findings.len());
@@ -273,6 +294,7 @@ async fn load_vts(
 fn result_to_finding(
     result: models::Result,
     vt_metadata: &std::collections::HashMap<String, models::VTData>,
+    discovery: Option<&DiscoveryResult>,
 ) -> Option<Finding> {
     let result_type = match result.r_type {
         models::ResultType::Alarm => "Alarm",
@@ -286,6 +308,86 @@ fn result_to_finding(
 
     let host = result.ip_address.or(result.hostname).unwrap_or_default();
     let oid = result.oid.clone().unwrap_or_default();
+    let protocol = result.protocol.map(|p| match p {
+        models::Protocol::TCP => "tcp".to_string(),
+        models::Protocol::UDP => "udp".to_string(),
+    });
+
+    let service = result.port.and_then(|port| {
+        discovery
+            .and_then(|scan| {
+                scan.hosts
+                    .iter()
+                    .find(|candidate| candidate.address == host)
+            })
+            .and_then(|candidate| {
+                candidate.services.iter().find(|candidate| {
+                    candidate.port == port as u16
+                        && protocol.as_deref().map_or(true, |value| {
+                            matches!(
+                                (value, candidate.protocol),
+                                ("tcp", Protocol::Tcp) | ("udp", Protocol::Udp)
+                            )
+                        })
+                })
+            })
+    });
+
+    let mut evidence = Vec::new();
+    if let Some(service) = service {
+        if let Some(value) = &service.service {
+            evidence.push(Evidence {
+                kind: "service".into(),
+                source: "discovery".into(),
+                value: value.clone(),
+            });
+        }
+        if let Some(value) = &service.product {
+            evidence.push(Evidence {
+                kind: "product".into(),
+                source: "discovery".into(),
+                value: value.clone(),
+            });
+        }
+        if let Some(value) = &service.version {
+            evidence.push(Evidence {
+                kind: "version".into(),
+                source: "discovery".into(),
+                value: value.clone(),
+            });
+        }
+        for value in &service.cpe {
+            evidence.push(Evidence {
+                kind: "cpe".into(),
+                source: "discovery".into(),
+                value: value.clone(),
+            });
+        }
+        if let Some(fingerprint) = &service.fingerprint {
+            if let Some(value) = &fingerprint.banner {
+                evidence.push(Evidence {
+                    kind: "banner".into(),
+                    source: "fingerprint".into(),
+                    value: value.clone(),
+                });
+            }
+            for (key, value) in &fingerprint.headers {
+                evidence.push(Evidence {
+                    kind: "header".into(),
+                    source: "fingerprint".into(),
+                    value: format!("{key}: {value}"),
+                });
+            }
+        }
+    }
+
+    if let Some(message) = &result.message {
+        evidence.push(Evidence {
+            kind: "result".into(),
+            source: "openvas-vt".into(),
+            value: message.clone(),
+        });
+    }
 
     // Look up VT metadata for name, severity, CVEs, etc.
     let (name, severity, solution, references, cves) =
@@ -315,11 +417,8 @@ fn result_to_finding(
     Some(Finding {
         host,
         port: result.port,
-        protocol: result.protocol.map(|p| match p {
-            models::Protocol::TCP => "tcp".to_string(),
-            models::Protocol::UDP => "udp".to_string(),
-        }),
-        oid,
+        protocol,
+        oid: oid.clone(),
         name,
         severity,
         cves,
@@ -327,6 +426,16 @@ fn result_to_finding(
         solution,
         references,
         result_type: result_type.to_string(),
+        service: service.and_then(|value| value.service.clone()),
+        product: service.and_then(|value| value.product.clone()),
+        version: service.and_then(|value| value.version.clone()),
+        cpe: service.map(|value| value.cpe.clone()).unwrap_or_default(),
+        evidence,
+        detection_reason: Some(format!(
+            "OpenVAS VT {oid} produced a {} result from target evidence",
+            result_type
+        )),
+        source: Some("OpenVAS VT feed".into()),
     })
 }
 
