@@ -62,7 +62,7 @@ pub async fn run_scan(
     let storage = Arc::new(InMemoryStorage::new());
     let loader = Loader::from_feed_path(feed_path);
 
-    eprintln!("  [1/6] Loading feed metadata...");
+    eprintln!("Loading vulnerability feed...");
     let verifier = HashSumNameLoader::sha256(&loader)
         .map_err(|e| CynError::Scanner(format!("failed to create feed verifier: {e}")))?;
     let updater = Update::init("cyn", 5, loader.clone(), &storage, verifier);
@@ -70,21 +70,17 @@ pub async fn run_scan(
         .perform_update()
         .await
         .map_err(|e| CynError::Scanner(format!("feed update failed: {e}")))?;
-    eprintln!("  [1/6] Feed metadata loaded");
+    eprintln!("Feed ready.");
 
-    eprintln!("  [2/6] Loading VT list...");
+    eprintln!("Selecting vulnerability checks...");
     let vts = load_vts(&storage, request, open_ports).await?;
-    eprintln!("  [2/6] {} VTs loaded", vts.len());
+    eprintln!("Selected {} vulnerability checks.", vts.len());
 
     let models_scan = build_scan_model(request, vts)?;
     let scan_id = models_scan.scan_id.clone();
     let scan = Scan::default_to_localhost(models_scan);
     let target_count = scan.targets.iter().count();
-    eprintln!(
-        "  [3/6] Scan model built: {} host(s), {} VT(s)",
-        target_count,
-        scan.vts.len()
-    );
+    eprintln!("Scanning {} host(s)...", target_count);
 
     let capacity = target_count.max(1);
     let (tx_target, rx_target) = mpsc::channel::<TargetId>(capacity);
@@ -96,15 +92,12 @@ pub async fn run_scan(
     }
     drop(tx_target);
 
-    eprintln!("  [5/6] Creating scan runner...");
     let executor = nasl_std_executor();
     let scheduler = Scheduler::new(storage.clone());
-    eprintln!("  [4/6] Building execution plan...");
     let schedule = scheduler
         .execution_plan(&scan.vts)
         .await
         .map_err(|e| CynError::Scanner(format!("scheduling failed: {e}")))?;
-    eprintln!("  [4/6] Execution plan ready");
 
     tracing::info!(
         "scan started: {} target(s), {} VTs",
@@ -131,7 +124,6 @@ pub async fn run_scan(
     let runner = ScanRunner::new(schedule, rx_target, &scan_ctx)
         .map_err(|e| CynError::Scanner(format!("failed to create scan runner: {e}")))?;
 
-    eprintln!("  [6/6] Executing scan...");
     let mut succeeded = 0u32;
     let mut failed = 0u32;
     let mut errors = 0u32;
@@ -169,16 +161,12 @@ pub async fn run_scan(
         "scan execution complete: succeeded={succeeded}, failed={failed}, errors={errors}, total_stream_results={total_results}"
     );
 
-    eprintln!("  [done] Results: succeeded={succeeded}, failed={failed}, errors={errors}");
-
     let results = storage
         .remove(&ScanID(scan_id))
         .await
         .map_err(|e| CynError::Scanner(format!("failed to retrieve results: {e}")))?;
 
     let raw_results = results.unwrap_or_default();
-    eprintln!("  [done] Raw results from storage: {}", raw_results.len());
-
     // Log result types
     use std::collections::HashMap;
     let mut type_counts: HashMap<String, u32> = HashMap::new();
@@ -322,10 +310,6 @@ async fn load_vts(
                         })
                         .collect();
 
-                    eprintln!(
-                        "  filter: {} kept, {} skipped (port mismatch), {} skipped (irrelevant family)",
-                        kept, skipped_port, skipped_family
-                    );
                     tracing::info!(
                         "filtered {} VTs to {} (kept={}, port_skip={}, family_skip={})",
                         vts.len(),
