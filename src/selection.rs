@@ -2,7 +2,7 @@ use crate::discovery::{DiscoveryResult, Protocol};
 use scannerlib::models;
 use std::collections::{HashMap, HashSet};
 
-const BOOTSTRAP_FAMILIES: &[&str] = &["Port scanners", "Product detection", "Service detection"];
+const BOOTSTRAP_FAMILIES: &[&str] = &["Port scanners"];
 const SKIPPED_FAMILIES: &[&str] = &[
     "attic",
     "Windows",
@@ -28,7 +28,15 @@ pub struct SelectionContext {
     discovered: bool,
     tcp_ports: HashSet<String>,
     udp_ports: HashSet<String>,
+    identities: Vec<ServiceIdentity>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ServiceIdentity {
+    port: u16,
+    udp: bool,
     tokens: HashSet<String>,
+    version: Option<ParsedVersion>,
 }
 
 impl SelectionContext {
@@ -45,11 +53,9 @@ impl SelectionContext {
             ..Default::default()
         };
         for host in &discovery.hosts {
-            if let Some(os) = &host.os {
-                context.add_tokens(os);
-            }
             for service in &host.services {
                 let port = service.port.to_string();
+                let udp = service.protocol == Protocol::Udp;
                 match service.protocol {
                     Protocol::Tcp => {
                         context.tcp_ports.insert(port);
@@ -58,44 +64,45 @@ impl SelectionContext {
                         context.udp_ports.insert(port);
                     }
                 }
-                for value in [
-                    service.service.as_deref(),
+                let mut identity = ServiceIdentity {
+                    port: service.port,
+                    udp,
+                    ..Default::default()
+                };
+                for value in [service.service.as_deref(), service.product.as_deref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    add_tokens(&mut identity.tokens, value);
+                }
+                if let Some((product, version)) = normalize_product_version(
                     service.product.as_deref(),
                     service.version.as_deref(),
-                ]
-                .into_iter()
-                .flatten()
-                {
-                    context.add_tokens(value);
+                ) {
+                    add_tokens(&mut identity.tokens, &product);
+                    identity.version = Some(version);
+                } else {
+                    identity.version = service.version.as_deref().and_then(parse_version);
                 }
                 for cpe in &service.cpe {
-                    context.add_tokens(cpe);
+                    add_tokens(&mut identity.tokens, cpe);
                 }
                 if let Some(fingerprint) = &service.fingerprint {
                     for value in [
                         fingerprint.protocol.as_deref(),
                         fingerprint.product.as_deref(),
-                        fingerprint.version.as_deref(),
                         fingerprint.banner.as_deref(),
                     ]
                     .into_iter()
                     .flatten()
                     {
-                        context.add_tokens(value);
+                        add_tokens(&mut identity.tokens, value);
                     }
                 }
+                context.identities.push(identity);
             }
         }
         context
-    }
-
-    fn add_tokens(&mut self, value: &str) {
-        self.tokens.extend(
-            value
-                .split(|c: char| !c.is_ascii_alphanumeric())
-                .map(str::to_ascii_lowercase)
-                .filter(|token| token.len() >= 3),
-        );
     }
 
     fn has_port(&self, requirement: &str, udp: bool) -> bool {
@@ -192,12 +199,114 @@ fn is_relevant(data: &models::VTData, context: &SelectionContext) -> bool {
     if BOOTSTRAP_FAMILIES.contains(&data.family.as_str()) {
         return true;
     }
-    let haystack = format!(
-        "{} {} {} {:?}",
-        data.name, data.filename, data.family, data.tag
-    )
-    .to_ascii_lowercase();
-    context.tokens.iter().any(|token| haystack.contains(token))
+    let metadata_tokens = tokenize(&format!("{} {} {}", data.name, data.filename, data.family));
+    let matched_identities: Vec<&ServiceIdentity> = context
+        .identities
+        .iter()
+        .filter(|identity| {
+            let port_match = if identity.udp {
+                data.required_udp_ports.is_empty()
+                    || data.required_udp_ports.iter().any(|port| {
+                        port.split('/').next().unwrap_or(port).trim() == identity.port.to_string()
+                    })
+            } else {
+                data.required_ports.is_empty()
+                    || data.required_ports.iter().any(|port| {
+                        port.split('/').next().unwrap_or(port).trim() == identity.port.to_string()
+                    })
+            };
+            port_match
+                && identity
+                    .tokens
+                    .iter()
+                    .any(|token| metadata_tokens.contains(token))
+        })
+        .collect();
+    if matched_identities.is_empty() {
+        return false;
+    }
+
+    // If the feed explicitly gives a simple upper-bound affected range, use
+    // the normalized observed version to avoid selecting checks for fixed
+    // versions. Unknown or complex ranges remain candidates for detection.
+    if let Some(affected) = data.tag.get(&models::TagKey::Affected) {
+        let affected = affected.to_string();
+        if let Some(bound) = less_than_bound(&affected) {
+            return matched_identities
+                .into_iter()
+                .filter_map(|identity| identity.version.as_ref())
+                .any(|version| version < &bound);
+        }
+    }
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ParsedVersion {
+    pub major: u64,
+    pub minor: u64,
+    pub patch: u64,
+    pub update: Option<String>,
+}
+
+pub fn parse_version(raw: &str) -> Option<ParsedVersion> {
+    let raw = raw.trim().trim_start_matches('v');
+    let suffix_start = raw.find(|c: char| c.is_ascii_alphabetic());
+    let (numeric_part, suffix) = match suffix_start {
+        Some(index) => (&raw[..index], Some(raw[index..].to_string())),
+        None => (raw, None),
+    };
+    let numeric = numeric_part.split('.').collect::<Vec<_>>();
+    if numeric.len() < 2 || numeric.iter().any(|part| part.parse::<u64>().is_err()) {
+        return None;
+    }
+    let suffix = suffix.filter(|value| !value.is_empty());
+    Some(ParsedVersion {
+        major: numeric[0].parse().ok()?,
+        minor: numeric[1].parse().ok()?,
+        patch: numeric
+            .get(2)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0),
+        update: suffix,
+    })
+}
+
+pub fn normalize_product_version(
+    product: Option<&str>,
+    version: Option<&str>,
+) -> Option<(String, ParsedVersion)> {
+    let product = product?.trim();
+    if product.is_empty() || product == "-" {
+        return None;
+    }
+    if let Some((name, embedded_version)) = product.rsplit_once('_') {
+        if let Some(version) = parse_version(embedded_version) {
+            return Some((name.to_string(), version));
+        }
+    }
+    Some((product.to_string(), parse_version(version?)?))
+}
+
+fn less_than_bound(affected: &str) -> Option<ParsedVersion> {
+    let position = affected.find('<')?;
+    let bound = affected[position + 1..]
+        .trim_start_matches('=')
+        .split_whitespace()
+        .next()?;
+    parse_version(bound)
+}
+
+fn tokenize(value: &str) -> HashSet<String> {
+    value
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .map(str::to_ascii_lowercase)
+        .filter(|token| token.len() >= 3 && token.chars().any(|c| c.is_ascii_alphabetic()))
+        .collect()
+}
+
+fn add_tokens(tokens: &mut HashSet<String>, value: &str) {
+    tokens.extend(tokenize(value));
 }
 
 #[cfg(test)]
@@ -280,5 +389,102 @@ mod tests {
         let (selected, stats) = select_vts(&[root], &metadata, &context());
         assert_eq!(selected.len(), 2);
         assert_eq!(stats.added_dependencies, 1);
+    }
+
+    #[test]
+    fn normalizes_openssh_product_and_update() {
+        let (product, version) = normalize_product_version(Some("OpenSSH_9.6p1"), None).unwrap();
+        assert_eq!(product, "OpenSSH");
+        assert_eq!(version.major, 9);
+        assert_eq!(version.minor, 6);
+        assert_eq!(version.update.as_deref(), Some("p1"));
+    }
+
+    #[test]
+    fn compares_versions_structurally() {
+        assert!(parse_version("9.6p1").unwrap() < parse_version("10.5").unwrap());
+        assert!(!(parse_version("10.5").unwrap() < parse_version("10.5").unwrap()));
+        assert!(parse_version("unknown").is_none());
+    }
+
+    #[test]
+    fn product_mismatch_is_not_selected() {
+        let (candidate, data) = vt("openssh", "OpenSSH vulnerability", "General", "22/tcp");
+        let metadata = HashMap::from([(candidate.oid.clone(), data)]);
+        let nginx_context = SelectionContext::from_discovery(&DiscoveryResult {
+            backend: "fixture".into(),
+            hosts: vec![DiscoveredHost {
+                address: "192.0.2.2".into(),
+                hostname: None,
+                os: None,
+                services: vec![DiscoveredService {
+                    port: 22,
+                    protocol: Protocol::Tcp,
+                    service: Some("ssh".into()),
+                    product: Some("nginx".into()),
+                    version: Some("9.6".into()),
+                    cpe: vec![],
+                    fingerprint: None,
+                }],
+            }],
+        });
+        let (selected, _) = select_vts(&[candidate], &metadata, &nginx_context);
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn known_service_selection_is_narrower_than_feed() {
+        let mut candidates = Vec::new();
+        let mut metadata = HashMap::new();
+        for index in 0..100 {
+            let (candidate, data) = vt(
+                &format!("generic-{index}"),
+                "Unrelated web application check",
+                "General",
+                "",
+            );
+            metadata.insert(candidate.oid.clone(), data);
+            candidates.push(candidate);
+        }
+        let (ssh, ssh_data) = vt("ssh-check", "OpenSSH vulnerability", "General", "22/tcp");
+        metadata.insert(ssh.oid.clone(), ssh_data);
+        candidates.push(ssh);
+        let (selected, _) = select_vts(&candidates, &metadata, &context());
+        assert_eq!(selected.len(), 1);
+        assert!(selected[0].oid == "ssh-check");
+    }
+
+    #[test]
+    fn affected_upper_bound_selects_vulnerable_version_only() {
+        let (candidate, mut data) = vt(
+            "openssh-range",
+            "OpenSSH vulnerability",
+            "General",
+            "22/tcp",
+        );
+        data.tag.insert(models::TagKey::Affected, "< 10.5".into());
+        let metadata = HashMap::from([(candidate.oid.clone(), data.clone())]);
+        let (selected, _) = select_vts(&[candidate.clone()], &metadata, &context());
+        assert_eq!(selected.len(), 1);
+
+        let fixed_context = SelectionContext::from_discovery(&DiscoveryResult {
+            backend: "fixture".into(),
+            hosts: vec![DiscoveredHost {
+                address: "192.0.2.3".into(),
+                hostname: None,
+                os: None,
+                services: vec![DiscoveredService {
+                    port: 22,
+                    protocol: Protocol::Tcp,
+                    service: Some("ssh".into()),
+                    product: Some("OpenSSH".into()),
+                    version: Some("10.5".into()),
+                    cpe: vec![],
+                    fingerprint: None,
+                }],
+            }],
+        });
+        let (selected, _) = select_vts(&[candidate], &metadata, &fixed_context);
+        assert!(selected.is_empty());
     }
 }
