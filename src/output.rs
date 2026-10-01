@@ -3,6 +3,52 @@ use crate::error::CynError;
 use crate::feed::FeedInfo;
 use crate::scanner::Finding;
 use std::collections::HashSet;
+use std::fmt::Display;
+use std::io::{self, IsTerminal};
+
+struct Style {
+    enabled: bool,
+}
+
+impl Style {
+    fn terminal() -> Self {
+        Self {
+            enabled: io::stdout().is_terminal(),
+        }
+    }
+
+    fn paint(&self, code: &str, value: impl Display) -> String {
+        if self.enabled {
+            format!("\x1b[{code}m{value}\x1b[0m")
+        } else {
+            value.to_string()
+        }
+    }
+
+    fn bold(&self, value: impl Display) -> String {
+        self.paint("1", value)
+    }
+
+    fn cyan(&self, value: impl Display) -> String {
+        self.paint("36", value)
+    }
+
+    fn green(&self, value: impl Display) -> String {
+        self.paint("32", value)
+    }
+
+    fn yellow(&self, value: impl Display) -> String {
+        self.paint("33", value)
+    }
+
+    fn red(&self, value: impl Display) -> String {
+        self.paint("31", value)
+    }
+
+    fn dim(&self, value: impl Display) -> String {
+        self.paint("2", value)
+    }
+}
 
 /// Print feed status to the terminal.
 pub fn print_feed_status(info: &FeedInfo) {
@@ -25,19 +71,26 @@ pub fn output_findings(findings: &[Finding], format: OutputFormat) -> Result<(),
 }
 
 fn print_findings_terminal(findings: &[Finding]) -> Result<(), CynError> {
+    let style = Style::terminal();
     let actionable: Vec<&Finding> = findings
         .iter()
         .filter(|finding| finding.result_type == "Alarm" || finding.result_type == "Error")
         .collect();
 
     if actionable.is_empty() {
-        println!("No vulnerabilities found.");
+        println!();
+        println!(
+            "╭─ {} ───────────────────────────────╮",
+            style.bold("Scan result")
+        );
+        println!("│ {} No vulnerabilities found", style.green("✓"));
         if !findings.is_empty() {
             println!(
-                "{} informational result(s) hidden; use --output json to inspect them.",
+                "│ {} informational result(s) hidden; use --output json to inspect them.",
                 findings.len()
             );
         }
+        println!("╰─────────────────────────────────────╯");
         return Ok(());
     }
 
@@ -57,38 +110,63 @@ fn print_findings_terminal(findings: &[Finding]) -> Result<(), CynError> {
         })
         .collect();
 
-    println!("\n=== Findings ({}) ===\n", unique.len());
+    println!();
+    println!(
+        "╭─ {} ──────────────────────────────╮",
+        style.bold(format!("Findings ({})", unique.len()))
+    );
 
     for (i, f) in unique.iter().enumerate() {
         let severity = f
             .severity
-            .map(|s| format!("{s:.1}"))
+            .map(|s| {
+                let value = format!("{s:.1}");
+                if s >= 7.0 {
+                    style.red(value)
+                } else if s >= 4.0 {
+                    style.yellow(value)
+                } else {
+                    style.green(value)
+                }
+            })
             .unwrap_or_else(|| "N/A".into());
 
-        println!("{}. [{}] {}", i + 1, severity, f.name);
-        println!("   Host:     {}", f.host);
+        let marker = if f.result_type == "Error" {
+            style.red("!")
+        } else {
+            style.red("!")
+        };
+        println!(
+            "│ {}. {} [{}] {}",
+            i + 1,
+            marker,
+            severity,
+            style.bold(&f.name)
+        );
+        println!("│    {} {}", style.dim("Host:"), f.host);
         if let Some(port) = &f.port {
             let proto = f.protocol.as_deref().unwrap_or("tcp");
-            println!("   Port:     {port}/{proto}");
+            println!("│    {} {port}/{proto}", style.dim("Port:"));
         }
-        println!("   OID:      {}", f.oid);
-        println!("   Type:     {}", f.result_type);
+        println!("│    {} {}", style.dim("OID:"), f.oid);
         if let Some(desc) = &f.description {
-            println!("   Summary:  {desc}");
+            println!("│    {} {desc}", style.dim("Summary:"));
         }
         if !f.cves.is_empty() {
-            println!("   CVEs:     {}", f.cves.join(", "));
+            println!("│    {} {}", style.dim("CVEs:"), f.cves.join(", "));
         }
         if let Some(sol) = &f.solution {
-            println!("   Solution: {sol}");
+            println!("│    {} {sol}", style.dim("Solution:"));
         }
         if !f.references.is_empty() {
-            println!("   Refs:     {}", f.references.join(", "));
+            println!("│    {} {}", style.dim("Refs:"), f.references.join(", "));
         }
-        println!();
+        if i + 1 < unique.len() {
+            println!("│");
+        }
     }
 
-    println!("=== Scan complete ===");
+    println!("╰────────────────────────────────────╯");
     Ok(())
 }
 
@@ -101,10 +179,17 @@ fn print_findings_json(findings: &[Finding]) -> Result<(), CynError> {
 
 /// Print a scanning progress message.
 pub fn print_scan_start(target: &str) {
-    println!("Starting scan against {target}...");
+    let style = Style::terminal();
+    println!(
+        "{} {} {}",
+        style.cyan("▶"),
+        style.bold("Cyn scan"),
+        style.dim(format!("→ {target}"))
+    );
 }
 
 pub fn print_scan_complete(findings: &[Finding]) {
+    let style = Style::terminal();
     let vulnerabilities = findings
         .iter()
         .filter(|finding| finding.result_type == "Alarm")
@@ -118,7 +203,17 @@ pub fn print_scan_complete(findings: &[Finding]) {
         .filter(|finding| finding.result_type == "Log")
         .count();
 
+    let status = if vulnerabilities > 0 || errors > 0 {
+        style.red("✗ attention needed")
+    } else {
+        style.green("✓ complete")
+    };
     println!(
-        "Scan complete: {vulnerabilities} vulnerability(s), {errors} error(s), {informational} informational result(s)."
+        "{} {}  {} vulnerabilities · {} errors · {} informational",
+        status,
+        style.bold("Scan complete"),
+        vulnerabilities,
+        errors,
+        informational
     );
 }
