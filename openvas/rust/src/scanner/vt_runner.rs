@@ -123,31 +123,19 @@ impl<'a> VTRunner<'a> {
             .await?
         }
 
-        let check_port = async |pt: Protocol, port: &str| {
-            let kbk = match pt {
-                Protocol::UDP => KbKey::Port(kb::Port::Udp(port.to_string())),
-                Protocol::TCP => KbKey::Port(kb::Port::Tcp(port.to_string())),
-            };
-            self.check_key(
-                &KbContextKey(key.clone(), kbk),
-                || Some(ScriptResultKind::MissingPort(pt, port.to_string())),
-                |mut v| {
-                    if !v.is_empty() && v.pop().unwrap().into() {
-                        None
-                    } else {
-                        Some(ScriptResultKind::MissingPort(pt, port.to_string()))
-                    }
-                },
-                |_| Some(ScriptResultKind::MissingPort(pt, port.to_string())),
-            )
-            .await
-        };
-        for k in &vt.required_ports {
-            check_port(Protocol::TCP, k).await?
-        }
-        for k in &vt.required_udp_ports {
-            check_port(Protocol::UDP, k).await?
-        }
+        // script_require_ports() receives alternatives, not a list of ports
+        // that must all be open. For example, a VT may declare
+        // ("Services/ftp", 21, 6200), where any one matching service/port is
+        // sufficient to run the check. Requiring every entry made nearly all
+        // vulnerability VTs exit before their NASL body executed.
+        check_required_ports(&self.scan_ctx, &key, Protocol::TCP, &vt.required_ports).await?;
+        check_required_ports(
+            &self.scan_ctx,
+            &key,
+            Protocol::UDP,
+            &vt.required_udp_ports,
+        )
+        .await?;
 
         Ok(())
     }
@@ -209,4 +197,45 @@ impl<'a> VTRunner<'a> {
                 .into(),
         })
     }
+}
+
+async fn check_required_ports(
+    scan_ctx: &ScanCtx<'_>,
+    key: &KbContext,
+    protocol: Protocol,
+    requirements: &[String],
+) -> Result<(), ScriptResultKind> {
+    if requirements.is_empty() {
+        return Ok(());
+    }
+
+    for requirement in requirements {
+        let kb_key = if let Some(service) = requirement.strip_prefix("Services/") {
+            KbKey::Service(kb::Service::Custom(service.to_string()))
+        } else if requirement.contains('/') {
+            KbKey::Custom(requirement.clone())
+        } else {
+            match protocol {
+                Protocol::TCP => KbKey::Port(kb::Port::Tcp(requirement.clone())),
+                Protocol::UDP => KbKey::Port(kb::Port::Udp(requirement.clone())),
+            }
+        };
+        let context_key = KbContextKey(key.clone(), kb_key);
+        match scan_ctx.storage().retrieve(&context_key).await {
+            Ok(Some(values)) => {
+                if values.into_iter().any(bool::from) {
+                    return Ok(());
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                warn!(%error, requirement, "failed to read required port key");
+            }
+        }
+    }
+
+    Err(ScriptResultKind::MissingPort(
+        protocol,
+        requirements.join(", "),
+    ))
 }
