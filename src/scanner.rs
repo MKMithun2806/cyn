@@ -18,8 +18,9 @@ use scannerlib::nasl::utils::ctx::{CtxTarget, CtxTargets, ScanCtx, TargetId};
 use scannerlib::scanner::{Scan, ScanRunner};
 use scannerlib::scheduling::Scheduler;
 use scannerlib::storage::inmemory::InMemoryStorage;
+use scannerlib::storage::items::kb::{self, KbContextKey, KbItem};
 use scannerlib::storage::items::nvt::Feed;
-use scannerlib::storage::{Remover, Retriever, ScanID};
+use scannerlib::storage::{Remover, Retriever, ScanID, Target};
 
 /// synscan.nasl requires raw sockets (CAP_NET_RAW). We exclude it so the
 /// TCP-connect scanner (`openvas_tcp_scanner.nasl`) handles port scanning instead.
@@ -160,6 +161,14 @@ pub async fn run_scan(
         None,
     );
 
+    let seeded = seed_discovery_kb(&scan_ctx, request.discovery.as_ref()).await?;
+    if seeded > 0 {
+        tracing::info!(
+            services = seeded,
+            "seeded OpenVAS KB from discovery results"
+        );
+    }
+
     let runner = ScanRunner::new(schedule, rx_target, &scan_ctx)
         .map_err(|e| CynError::Scanner(format!("failed to create scan runner: {e}")))?;
 
@@ -228,6 +237,199 @@ pub async fn run_scan(
     tracing::info!("findings after conversion: {}", findings.len());
 
     Ok(findings)
+}
+
+/// Seed the OpenVAS knowledge base with facts already established by an
+/// imported discovery result. NASLs still perform their own safe probes, but
+/// dependent checks no longer have to rediscover facts that Nmap already gave
+/// us (notably TCP/PORTS, service aliases, and application CPE records).
+async fn seed_discovery_kb(
+    scan_ctx: &ScanCtx<'_>,
+    discovery: Option<&DiscoveryResult>,
+) -> Result<usize, CynError> {
+    let Some(discovery) = discovery else {
+        return Ok(0);
+    };
+    let mut service_count = 0;
+
+    for host in &discovery.hosts {
+        let context = (scan_ctx.scan().clone(), Target(host.address.clone()));
+
+        for service in &host.services {
+            let port = service.port.to_string();
+            let protocol = match service.protocol {
+                Protocol::Tcp => "tcp",
+                Protocol::Udp => "udp",
+            };
+
+            set_discovery_kb(
+                scan_ctx,
+                &context,
+                kb::KbKey::Port(match service.protocol {
+                    Protocol::Tcp => kb::Port::Tcp(port.clone()),
+                    Protocol::Udp => kb::Port::Udp(port.clone()),
+                }),
+                KbItem::Number(1),
+            )
+            .await?;
+
+            if service.protocol == Protocol::Tcp {
+                set_discovery_custom_kb(
+                    scan_ctx,
+                    &context,
+                    "TCP/PORTS",
+                    KbItem::String(port.clone()),
+                )
+                .await?;
+                set_discovery_kb(
+                    scan_ctx,
+                    &context,
+                    kb::KbKey::Host(kb::Host::Tcp),
+                    KbItem::Boolean(true),
+                )
+                .await?;
+            }
+
+            if let Some(name) = service.service.as_deref().filter(|name| !name.is_empty()) {
+                set_discovery_kb(
+                    scan_ctx,
+                    &context,
+                    kb::KbKey::Service(kb::Service::Custom(name.to_ascii_lowercase())),
+                    KbItem::String(format!("{port}/{protocol}")),
+                )
+                .await?;
+                if service.protocol == Protocol::Tcp {
+                    set_discovery_kb(
+                        scan_ctx,
+                        &context,
+                        kb::KbKey::KnownTcp(service.port),
+                        KbItem::String(name.to_ascii_lowercase()),
+                    )
+                    .await?;
+                }
+            }
+
+            if let Some(product) = service
+                .product
+                .as_deref()
+                .filter(|value| !value.is_empty() && *value != "-")
+            {
+                let product_key = product
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or(product)
+                    .to_ascii_lowercase();
+                set_discovery_custom_kb(
+                    scan_ctx,
+                    &context,
+                    &format!("{product_key}/detected"),
+                    KbItem::Boolean(true),
+                )
+                .await?;
+                if let Some(name) = service.service.as_deref().filter(|name| !name.is_empty()) {
+                    set_discovery_custom_kb(
+                        scan_ctx,
+                        &context,
+                        &format!("{product_key}/{}/detected", name.to_ascii_lowercase()),
+                        KbItem::Boolean(true),
+                    )
+                    .await?;
+                }
+            }
+
+            for cpe in &service.cpe {
+                seed_cpe_application(
+                    scan_ctx,
+                    &context,
+                    cpe,
+                    service.port,
+                    protocol,
+                    service.service.as_deref(),
+                )
+                .await?;
+            }
+            service_count += 1;
+        }
+    }
+
+    Ok(service_count)
+}
+
+async fn set_discovery_kb(
+    scan_ctx: &ScanCtx<'_>,
+    context: &(ScanID, Target),
+    key: kb::KbKey,
+    value: KbItem,
+) -> Result<(), CynError> {
+    scan_ctx
+        .storage()
+        .dispatch(KbContextKey(context.clone(), key), value)
+        .await
+        .map_err(|error| CynError::Scanner(format!("failed to seed discovery KB: {error}")))
+}
+
+async fn set_discovery_custom_kb(
+    scan_ctx: &ScanCtx<'_>,
+    context: &(ScanID, Target),
+    key: &str,
+    value: KbItem,
+) -> Result<(), CynError> {
+    set_discovery_kb(scan_ctx, context, kb::KbKey::Custom(key.to_string()), value).await
+}
+
+async fn seed_cpe_application(
+    scan_ctx: &ScanCtx<'_>,
+    context: &(ScanID, Target),
+    cpe: &str,
+    port: u16,
+    protocol: &str,
+    service: Option<&str>,
+) -> Result<(), CynError> {
+    let Some(base_cpe) = cpe_base(cpe) else {
+        return Ok(());
+    };
+    let location = format!("{port}/{protocol}");
+    let entry = format!("cyn.discovery#-#{cpe}#-#{location}#-#{port}#-#{protocol}");
+
+    for (key, value) in [
+        ("HostDetails", KbItem::String("App".into())),
+        ("HostDetails/NVT", KbItem::String("cyn.discovery".into())),
+        (
+            "HostDetails/NVT/cyn.discovery/App",
+            KbItem::String(cpe.into()),
+        ),
+        (
+            &format!("HostDetails/NVT/cyn.discovery/{cpe}"),
+            KbItem::String(location.clone()),
+        ),
+        (&format!("get_app/{base_cpe}"), KbItem::String(entry)),
+        (
+            &format!("get_app/ports/{base_cpe}"),
+            KbItem::String(port.to_string()),
+        ),
+        (
+            &format!("get_app/protocols/{base_cpe}"),
+            KbItem::String(protocol.into()),
+        ),
+    ] {
+        set_discovery_custom_kb(scan_ctx, context, key, value).await?;
+    }
+    if let Some(service) = service.filter(|value| !value.is_empty()) {
+        set_discovery_custom_kb(
+            scan_ctx,
+            context,
+            &format!("get_app/services/{port}/{base_cpe}"),
+            KbItem::String(service.to_ascii_lowercase()),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+fn cpe_base(cpe: &str) -> Option<String> {
+    let fields: Vec<&str> = cpe.split(':').collect();
+    let count = if cpe.starts_with("cpe:2.3:") { 5 } else { 4 };
+    (fields.len() >= count).then(|| fields[..count].join(":"))
 }
 
 async fn build_vt_metadata_map(
@@ -668,5 +870,18 @@ mod tests {
         assert_eq!(ports[0].range[0].start, 22);
         assert_eq!(ports[0].range[1].start, 80);
         assert_eq!(ports[0].range[1].end, Some(443));
+    }
+
+    #[test]
+    fn cpe_base_preserves_vendor_and_product() {
+        assert_eq!(
+            cpe_base("cpe:/a:vsftpd:vsftpd:2.3.4").as_deref(),
+            Some("cpe:/a:vsftpd:vsftpd")
+        );
+        assert_eq!(
+            cpe_base("cpe:2.3:a:openbsd:openssh:4.7p1:*:*:*:*:*:*").as_deref(),
+            Some("cpe:2.3:a:openbsd:openssh")
+        );
+        assert!(cpe_base("not-a-cpe").is_none());
     }
 }
