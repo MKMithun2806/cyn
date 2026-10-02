@@ -465,10 +465,6 @@ impl<'a> ScanCtx<'a> {
         self.sockets.write().await
     }
 
-    pub async fn socket_handle_counts(&self) -> (usize, usize) {
-        self.sockets.read().await.handle_counts()
-    }
-
     pub(crate) fn add_fn_global_vars(&self, register: &mut Register) {
         for (name, val) in self.executor.iter_fn_global_vars() {
             register.add_global_var(name, val);

@@ -104,12 +104,8 @@ impl<'a> ScanRunner<'a> {
                     if let Some(pos) = queue.pop_front() {
                         let (stage, vts) = &concurrent_vts[pos.stage];
                         let (vt, param) = &vts[pos.vt];
-                        let mut result =
+                        let result =
                             VTRunner::run(pos.target, vt, *stage, param.as_ref(), scan_ctx).await;
-                        let rss_after_runner_bytes = super::vt_runner::current_rss_bytes();
-                        if let Ok(script_result) = &mut result {
-                            script_result.memory.rss_after_runner_bytes = rss_after_runner_bytes;
-                        }
                         return Some((result, (host_feed, queue)));
                     }
                 }

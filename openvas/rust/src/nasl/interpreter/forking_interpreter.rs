@@ -15,7 +15,6 @@ pub struct ForkingInterpreter<'ctx> {
     interpreters: Vec<Interpreter<'ctx>>,
     interpreter_index: usize,
     ast: Ast,
-    peak_reentry_stats: (usize, usize),
 }
 
 impl<'ctx> ForkingInterpreter<'ctx> {
@@ -31,7 +30,6 @@ impl<'ctx> ForkingInterpreter<'ctx> {
             interpreters,
             interpreter_index: 0,
             ast,
-            peak_reentry_stats: (0, 0),
         }
     }
 
@@ -46,19 +44,6 @@ impl<'ctx> ForkingInterpreter<'ctx> {
             result?;
         }
         Ok(())
-    }
-
-    pub fn retained_reentry_stats(&self) -> (usize, usize) {
-        self.interpreters
-            .iter()
-            .map(Interpreter::retained_reentry_stats)
-            .fold((0, 0), |(count, bytes), (next_count, next_bytes)| {
-                (count + next_count, bytes + next_bytes)
-            })
-    }
-
-    pub fn peak_reentry_stats(&self) -> (usize, usize) {
-        self.peak_reentry_stats
     }
 
     #[cfg(test)]
@@ -112,12 +97,7 @@ impl<'ctx> ForkingInterpreter<'ctx> {
         // remove and re-insert the interpreter on every statement,
         // even if the statement does not create a fork, which
         // might cause performance issues.
-        let interpreter = &self.interpreters[self.interpreter_index];
-        let reentry_stats = interpreter.retained_reentry_stats();
-        if reentry_stats.1 > self.peak_reentry_stats.1 {
-            self.peak_reentry_stats = reentry_stats;
-        }
-        if interpreter.wants_to_fork() {
+        if self.interpreters[self.interpreter_index].wants_to_fork() {
             let interpreter = self.interpreters.remove(self.interpreter_index);
             let forks = interpreter.make_forks();
             // Insert the new interpreters in order and "in place", so
@@ -473,9 +453,9 @@ mod tests {
 
         futures::executor::block_on(async {
             assert_eq!(interpreter.next().await.unwrap().unwrap(), 0.into());
-            assert_eq!(interpreter.retained_reentry_stats(), (0, 0));
+            assert_reentry_data_empty(&interpreter);
             assert_eq!(interpreter.next().await.unwrap().unwrap(), 1.into());
-            assert_eq!(interpreter.retained_reentry_stats(), (0, 0));
+            assert_reentry_data_empty(&interpreter);
         });
     }
 
@@ -503,16 +483,18 @@ mod tests {
             interpreter.next().await.unwrap().unwrap();
             let result = interpreter.next().await.unwrap().unwrap();
             assert!(matches!(result, NaslValue::Array(ref values) if values.len() == 512));
-            let (calls, bytes) = interpreter.peak_reentry_stats();
-            assert!(calls <= 1, "unexpected replay entries: {calls}");
-            assert!(
-                bytes < 32 * 1024,
-                "unexpected replay payload: {bytes} bytes"
-            );
-            assert_eq!(interpreter.retained_reentry_stats(), (0, 0));
+            assert_reentry_data_empty(&interpreter);
             assert_eq!(interpreter.next().await.unwrap().unwrap(), 512.into());
-            assert_eq!(interpreter.retained_reentry_stats(), (0, 0));
+            assert_reentry_data_empty(&interpreter);
         });
+    }
+
+    fn assert_reentry_data_empty(interpreter: &super::ForkingInterpreter<'_>) {
+        let current = &interpreter.interpreters[interpreter.interpreter_index];
+        match &current.fork_reentry_data {
+            super::super::ForkReentryData::Collecting { data, .. } => assert!(data.is_empty()),
+            super::super::ForkReentryData::Restoring { data } => assert!(data.is_empty()),
+        }
     }
 
     #[test]
