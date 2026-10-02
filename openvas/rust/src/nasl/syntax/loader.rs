@@ -9,6 +9,7 @@ use std::{
     fs::{self, File},
     io::{self, BufRead},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
 
 use thiserror::Error;
@@ -119,6 +120,7 @@ impl Loader {
             loader: Box::new({
                 FileSystemLoader {
                     root: path.as_ref().to_owned(),
+                    cache: Arc::new(Mutex::new(HashMap::new())),
                 }
             }),
         }
@@ -169,19 +171,39 @@ impl Loader {
 #[derive(Debug, Clone)]
 struct FileSystemLoader {
     root: PathBuf,
+    /// NASL source is immutable for the lifetime of a scan. Keep it in RAM so
+    /// every VT and repeated include only pays the filesystem cost once.
+    cache: Arc<Mutex<HashMap<String, Result<String, LoadError>>>>,
 }
 
 impl NaslLoader for FileSystemLoader {
     fn load(&self, filename: &str) -> Result<String, LoadError> {
+        if let Some(cached) = self
+            .cache
+            .lock()
+            .expect("NASL source cache mutex poisoned")
+            .get(filename)
+            .cloned()
+        {
+            return cached;
+        }
+
         let path = self.root.join(filename);
-        if !path.is_file() {
-            return Err(LoadError::NotFound(format!(
+        let result = if !path.is_file() {
+            Err(LoadError::NotFound(format!(
                 "{} does not exist or is not accessible.",
                 path.as_os_str().to_str().unwrap_or_default()
-            )));
-        }
-        // unfortunately nasl is still in iso-8859-1
-        read_utf8_or_non_utf8_path(path.as_path())
+            )))
+        } else {
+            // unfortunately nasl is still in iso-8859-1
+            read_utf8_or_non_utf8_path(path.as_path())
+        };
+
+        self.cache
+            .lock()
+            .expect("NASL source cache mutex poisoned")
+            .insert(filename.to_owned(), result.clone());
+        result
     }
 
     /// Return the root path of the plugins directory
@@ -195,6 +217,34 @@ impl NaslLoader for FileSystemLoader {
             Ok(file) => Ok(Box::new(io::BufReader::new(file))),
             Err(e) => Err(e),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Loader;
+    use std::fs;
+
+    #[test]
+    fn filesystem_loader_caches_source_contents() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("check.nasl");
+        fs::write(&path, "first").unwrap();
+
+        let loader = Loader::from_feed_path(directory.path());
+        assert_eq!(loader.load("check.nasl").unwrap(), "first");
+
+        fs::write(path, "second").unwrap();
+        assert_eq!(loader.load("check.nasl").unwrap(), "first");
+    }
+
+    #[test]
+    fn filesystem_loader_caches_missing_sources() {
+        let directory = tempfile::tempdir().unwrap();
+        let loader = Loader::from_feed_path(directory.path());
+        assert!(loader.load("missing.nasl").is_err());
+        fs::write(directory.path().join("missing.nasl"), "now present").unwrap();
+        assert!(loader.load("missing.nasl").is_err());
     }
 }
 
