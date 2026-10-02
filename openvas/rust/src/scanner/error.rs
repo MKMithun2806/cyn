@@ -7,6 +7,7 @@ use crate::models::{Host, Parameter, Protocol};
 use crate::nasl::interpreter::InterpreterError;
 use crate::scheduling::Stage;
 use crate::storage::error::StorageError;
+use std::time::Duration;
 
 #[derive(thiserror::Error, Debug, Clone)]
 /// An error occurred while executing the script
@@ -86,6 +87,16 @@ pub struct ScriptResult {
     pub kind: ScriptResultKind,
     /// The target of the result
     pub target: Host,
+    /// Wall-clock time spent in major execution phases.
+    pub timing: ExecutionTiming,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ExecutionTiming {
+    pub source_load: Duration,
+    pub prerequisites: Duration,
+    pub parse: Duration,
+    pub interpreter: Duration,
 }
 
 impl ScriptResult {

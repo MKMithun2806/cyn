@@ -28,6 +28,7 @@ mod scanner;
 pub use scanner::*;
 
 pub use error::ExecuteError;
+pub use error::ExecutionTiming;
 pub use scan::Scan;
 pub use scan_runner::ScanRunner;
 

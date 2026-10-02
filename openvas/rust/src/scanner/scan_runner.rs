@@ -74,6 +74,17 @@ impl<'a> ScanRunner<'a> {
         )
     }
 
+    /// Number of distinct scheduled VT positions for one target.
+    ///
+    /// Each scheduler wave contains VTs that may run concurrently. A VT in a
+    /// later wave, including an injected dependency, is a separate execution.
+    pub fn scheduled_execution_count(&self) -> usize {
+        self.concurrent_vts
+            .iter()
+            .map(|(_, vts)| vts.len())
+            .sum()
+    }
+
     pub fn stream(self) -> impl Stream<Item = Result<ScriptResult, ExecuteError>> + 'a {
         let ScanRunner {
             concurrent_vts,

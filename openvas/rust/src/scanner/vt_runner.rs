@@ -15,7 +15,7 @@ use tracing::{trace, warn};
 use crate::nasl::prelude::*;
 
 use super::ExecuteError;
-use super::error::{ScriptResult, ScriptResultKind};
+use super::error::{ExecutionTiming, ScriptResult, ScriptResultKind};
 
 /// Runs a single VT to completion on a single host.
 pub struct VTRunner<'a> {
@@ -152,38 +152,62 @@ impl<'a> VTRunner<'a> {
         )
     }
 
-    async fn execute_inner(&self, code: Code, register: Register) -> ScriptResultKind {
+    async fn execute_inner(
+        &self,
+        code: Code,
+        register: Register,
+    ) -> (ScriptResultKind, ExecutionTiming) {
+        let mut timing = ExecutionTiming::default();
+        let started = std::time::Instant::now();
         if let Err(e) = self.check_keys(self.vt).await {
-            return e;
+            timing.prerequisites = started.elapsed();
+            return (e, timing);
         }
+        timing.prerequisites = started.elapsed();
         let script_ctx = ScriptCtx::new(self.scan_ctx, self.target, self.vt.clone());
+        let parse_started = std::time::Instant::now();
         let ast = code.parse().emit_errors();
+        timing.parse = parse_started.elapsed();
         if let Err(errs) = ast {
-            return ScriptResultKind::Error(InterpreterError::syntax_error(errs));
+            return (
+                ScriptResultKind::Error(InterpreterError::syntax_error(errs)),
+                timing,
+            );
         }
         let ast = ast.unwrap();
 
         let mut interpreter = ForkingInterpreter::new(ast, register, self.scan_ctx, script_ctx);
+        let interpreter_started = std::time::Instant::now();
         while let Some(r) = interpreter.next().await {
             match r {
-                Ok(NaslValue::Exit(x)) => return ScriptResultKind::ReturnCode(x),
-                Err(e) => return ScriptResultKind::Error(e),
+                Ok(NaslValue::Exit(x)) => {
+                    timing.interpreter = interpreter_started.elapsed();
+                    return (ScriptResultKind::ReturnCode(x), timing);
+                }
+                Err(e) => {
+                    timing.interpreter = interpreter_started.elapsed();
+                    return (ScriptResultKind::Error(e), timing);
+                }
                 Ok(x) => {
                     trace!(statement_result=?x);
                 }
             }
         }
-        ScriptResultKind::ReturnCode(0)
+        timing.interpreter = interpreter_started.elapsed();
+        (ScriptResultKind::ReturnCode(0), timing)
     }
 
     async fn execute(mut self) -> Result<ScriptResult, ExecuteError> {
+        let load_started = std::time::Instant::now();
         let code = Code::load(self.scan_ctx.loader(), &self.vt.filename)?;
+        let source_load = load_started.elapsed();
         let mut register = Register::default();
         self.set_parameters(&mut register)?;
 
         // currently scans are limited to the target as well as the id.
         tracing::debug!("running");
-        let kind = self.execute_inner(code, register).await;
+        let (kind, mut timing) = self.execute_inner(code, register).await;
+        timing.source_load = source_load;
         tracing::debug!(result=?kind, "finished");
         Ok(ScriptResult {
             oid: self.vt.oid.clone(),
@@ -195,6 +219,7 @@ impl<'a> VTRunner<'a> {
                 .target_by_id(self.target)
                 .original_target_str()
                 .into(),
+            timing,
         })
     }
 }

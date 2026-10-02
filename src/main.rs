@@ -57,6 +57,7 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<(), error::CynError> {
+    let profile_execution = cli.verbose;
     let config = config::Config::resolve(cli.feed)?;
 
     match cli.command {
@@ -174,6 +175,7 @@ async fn run(cli: Cli) -> Result<(), error::CynError> {
                         .collect()
                 }),
                 discovery: Some(discovery),
+                profile_execution,
             };
 
             let mut findings = scanner::run_scan(&config, &request, &open_ports).await?;

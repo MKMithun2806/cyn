@@ -25,7 +25,7 @@ use crate::storage::{self, ScanID};
 use crate::storage::{Dispatcher, Remover, Retriever};
 //TODO: rename
 use crate::models::VTData;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, MutexGuard};
 
 use super::error::ReturnBehavior;
@@ -34,6 +34,15 @@ use super::hosts::{LOCALHOST, resolve_hostname};
 use super::{FnError, Register};
 use std::net::IpAddr;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BuiltinProfile {
+    pub calls: u64,
+    pub retries: u64,
+    pub elapsed: Duration,
+}
 
 #[derive(Debug, Clone)]
 pub struct VHost {
@@ -322,6 +331,8 @@ pub struct ScanCtx<'a> {
     pub scan_preferences: ScanPrefs,
     /// Alive test methods
     alive_test_methods: Vec<AliveTestMethods>,
+    profile_builtins: AtomicBool,
+    builtin_profile: Mutex<HashMap<String, BuiltinProfile>>,
     /// Notus
     pub notus: Option<NotusCtx>,
 }
@@ -350,8 +361,23 @@ impl<'a> ScanCtx<'a> {
             sockets: RwLock::new(sockets),
             scan_preferences,
             alive_test_methods,
+            profile_builtins: AtomicBool::new(false),
+            builtin_profile: Mutex::new(HashMap::new()),
             notus,
         }
+    }
+
+    pub fn enable_execution_profile(&self) {
+        self.profile_builtins.store(true, Ordering::Relaxed);
+    }
+
+    pub fn builtin_profile(&self) -> Vec<(String, BuiltinProfile)> {
+        self.builtin_profile
+            .lock()
+            .expect("builtin profile mutex poisoned")
+            .iter()
+            .map(|(name, metrics)| (name.clone(), *metrics))
+            .collect()
     }
 
     /// Executes a function by name
@@ -368,11 +394,30 @@ impl<'a> ScanCtx<'a> {
         let mut i = 0;
         loop {
             i += 1;
+            let profile = self.profile_builtins.load(Ordering::Relaxed);
+            let started = profile.then(Instant::now);
             let result = self.executor.exec(name, self, register, script_ctx).await;
+            if let Some(started) = started {
+                let mut metrics = self
+                    .builtin_profile
+                    .lock()
+                    .expect("builtin profile mutex poisoned");
+                let entry = metrics.entry(name.to_owned()).or_default();
+                entry.calls += 1;
+                entry.elapsed += started.elapsed();
+            }
             if let Some(Err(ref e)) = result
                 && e.retryable()
                 && i < NUM_RETRIES_ON_RETRYABLE_ERROR
             {
+                if profile {
+                    self.builtin_profile
+                        .lock()
+                        .expect("builtin profile mutex poisoned")
+                        .entry(name.to_owned())
+                        .or_default()
+                        .retries += 1;
+                }
                 continue;
             }
             return result;

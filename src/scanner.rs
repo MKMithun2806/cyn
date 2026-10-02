@@ -86,6 +86,7 @@ pub struct ScanRequest {
     pub vt_oids: Option<Vec<String>>,
     pub exclude_hosts: Option<Vec<String>>,
     pub discovery: Option<DiscoveryResult>,
+    pub profile_execution: bool,
 }
 
 pub async fn run_scan(
@@ -117,6 +118,7 @@ pub async fn run_scan(
     eprintln!("Selecting vulnerability checks...");
     let vts = load_vts(&storage, request, _open_ports).await?;
     eprintln!("Selected {} vulnerability checks.", vts.len());
+    let selected_count = vts.len();
 
     let models_scan = build_scan_model(request, vts)?;
     let scan_id = models_scan.scan_id.clone();
@@ -136,10 +138,12 @@ pub async fn run_scan(
 
     let executor = nasl_std_executor();
     let scheduler = Scheduler::new(storage.clone());
+    let scheduler_started = Instant::now();
     let schedule = scheduler
         .execution_plan(&scan.vts)
         .await
         .map_err(|e| CynError::Scanner(format!("scheduling failed: {e}")))?;
+    let scheduler_elapsed = scheduler_started.elapsed();
 
     tracing::info!(
         "scan started: {} target(s), {} VTs",
@@ -162,6 +166,9 @@ pub async fn run_scan(
         scan.alive_test_methods.clone(),
         None,
     );
+    if request.profile_execution {
+        scan_ctx.enable_execution_profile();
+    }
 
     let seeded = seed_discovery_kb(&scan_ctx, request.discovery.as_ref()).await?;
     if seeded > 0 {
@@ -174,18 +181,29 @@ pub async fn run_scan(
     let runner = ScanRunner::new(schedule, rx_target, &scan_ctx)
         .map_err(|e| CynError::Scanner(format!("failed to create scan runner: {e}")))?;
 
-    let mut progress = ScanProgress::new(scan.vts.len());
+    let scheduled_executions = runner
+        .scheduled_execution_count()
+        .saturating_mul(target_count);
+    eprintln!(
+        "Execution plan: {scheduled_executions} scheduled VT execution(s) across {target_count} target(s) ({selected_count} selected, {} in scan model, {} added by scheduling, scheduler {:.2}s)",
+        scan.vts.len(),
+        scheduled_executions.saturating_sub(scan.vts.len().saturating_mul(target_count)),
+        scheduler_elapsed.as_secs_f64()
+    );
+    let mut progress = ScanProgress::new(scheduled_executions);
+    let mut phase_timings = PhaseTimings::default();
     let mut succeeded = 0u32;
     let mut failed = 0u32;
     let mut errors = 0u32;
 
     let mut stream = Box::pin(runner.stream());
-    let mut total_results = 0u32;
+    let mut total_results = 0usize;
     while let Some(result) = stream.next().await {
         total_results += 1;
-        progress.update(total_results as usize);
+        progress.update(total_results);
         match result {
             Ok(script_result) => {
+                phase_timings.add(script_result.timing);
                 if script_result.has_succeeded() {
                     succeeded += 1;
                     tracing::debug!(
@@ -239,9 +257,45 @@ pub async fn run_scan(
         .collect();
 
     progress.finish(findings.len());
+    if request.profile_execution {
+        eprintln!(
+            "Execution profile: source load {:.1}s · prerequisite checks {:.1}s · NASL parse {:.1}s · interpreter/builtins {:.1}s",
+            phase_timings.source_load.as_secs_f64(),
+            phase_timings.prerequisites.as_secs_f64(),
+            phase_timings.parse.as_secs_f64(),
+            phase_timings.interpreter.as_secs_f64(),
+        );
+        let mut builtins = scan_ctx.builtin_profile();
+        builtins.sort_by_key(|(_, metrics)| std::cmp::Reverse(metrics.elapsed));
+        for (name, metrics) in builtins.into_iter().take(12) {
+            eprintln!(
+                "  builtin {name}: {:.2}s total · {} calls · {} retries",
+                metrics.elapsed.as_secs_f64(),
+                metrics.calls,
+                metrics.retries
+            );
+        }
+    }
     tracing::info!("findings after conversion: {}", findings.len());
 
     Ok(findings)
+}
+
+#[derive(Default)]
+struct PhaseTimings {
+    source_load: Duration,
+    prerequisites: Duration,
+    parse: Duration,
+    interpreter: Duration,
+}
+
+impl PhaseTimings {
+    fn add(&mut self, timing: scannerlib::scanner::ExecutionTiming) {
+        self.source_load += timing.source_load;
+        self.prerequisites += timing.prerequisites;
+        self.parse += timing.parse;
+        self.interpreter += timing.interpreter;
+    }
 }
 
 struct ScanProgress {
@@ -282,7 +336,6 @@ impl ScanProgress {
     }
 
     fn finish(&mut self, findings: usize) {
-        self.completed = self.completed.max(self.total);
         self.draw(Some(findings));
         if self.interactive {
             eprintln!();
@@ -926,6 +979,7 @@ mod tests {
             vt_oids: None,
             exclude_hosts: None,
             discovery: None,
+            profile_execution: false,
         };
         let scan = build_scan_model(&req, vec![]).unwrap();
         assert_eq!(scan.target.hosts, vec!["192.168.1.1"]);
@@ -942,6 +996,7 @@ mod tests {
             vt_oids: None,
             exclude_hosts: Some(vec!["10.0.0.3".into()]),
             discovery: None,
+            profile_execution: false,
         };
         let scan = build_scan_model(&req, vec![]).unwrap();
         assert_eq!(scan.target.hosts.len(), 2);
@@ -959,6 +1014,7 @@ mod tests {
             vt_oids: None,
             exclude_hosts: None,
             discovery: None,
+            profile_execution: false,
         };
         assert!(build_scan_model(&req, vec![]).is_err());
     }
