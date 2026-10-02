@@ -105,6 +105,11 @@ pub async fn run_scan(
     let storage = Arc::new(InMemoryStorage::new());
     let loader = Loader::from_feed_path(feed_path);
 
+    let mem_before_feed = process_memory();
+    tracing::info!(
+        rss_mb = mem_before_feed.rss_bytes / 1_000_000,
+        "starting feed update"
+    );
     eprintln!("Loading vulnerability feed...");
     let verifier = HashSumNameLoader::sha256(&loader)
         .map_err(|e| CynError::Scanner(format!("failed to create feed verifier: {e}")))?;
@@ -113,6 +118,14 @@ pub async fn run_scan(
         .perform_update()
         .await
         .map_err(|e| CynError::Scanner(format!("feed update failed: {e}")))?;
+    let mem_after_feed = process_memory();
+    let stats_after_feed = loader.cache_stats();
+    tracing::info!(
+        rss_mb = mem_after_feed.rss_bytes / 1_000_000,
+        cache_entries = stats_after_feed.entries,
+        cache_bytes_mb = stats_after_feed.approximate_bytes / 1_000_000,
+        "feed update complete"
+    );
     eprintln!("Feed ready.");
 
     eprintln!("Selecting vulnerability checks...");
@@ -198,9 +211,28 @@ pub async fn run_scan(
 
     let mut stream = Box::pin(runner.stream());
     let mut total_results = 0usize;
+    let mut last_telemetry = Instant::now();
     while let Some(result) = stream.next().await {
         total_results += 1;
         progress.update(total_results);
+
+        if total_results % 500 == 0 || last_telemetry.elapsed() >= Duration::from_secs(10) {
+            last_telemetry = Instant::now();
+            let mem = process_memory();
+            let stats = loader.cache_stats();
+            tracing::info!(
+                executions = total_results,
+                rss_mb = mem.rss_bytes / 1_000_000,
+                vm_mb = mem.vm_bytes / 1_000_000,
+                swap_mb = mem.swap_bytes / 1_000_000,
+                cache_entries = stats.entries,
+                cache_bytes_mb = stats.approximate_bytes / 1_000_000,
+                cache_hits = stats.hits,
+                cache_misses = stats.misses,
+                "memory/cache telemetry"
+            );
+        }
+
         match result {
             Ok(script_result) => {
                 phase_timings.add(script_result.timing);
@@ -227,7 +259,17 @@ pub async fn run_scan(
         }
     }
 
+    let mem_final = process_memory();
+    let stats_final = loader.cache_stats();
     tracing::info!(
+        executions = total_results,
+        rss_mb = mem_final.rss_bytes / 1_000_000,
+        vm_mb = mem_final.vm_bytes / 1_000_000,
+        swap_mb = mem_final.swap_bytes / 1_000_000,
+        cache_entries = stats_final.entries,
+        cache_bytes_mb = stats_final.approximate_bytes / 1_000_000,
+        cache_hits = stats_final.hits,
+        cache_misses = stats_final.misses,
         "scan execution complete: succeeded={succeeded}, failed={failed}, errors={errors}, total_stream_results={total_results}"
     );
 
@@ -349,14 +391,17 @@ impl ScanProgress {
             (Some(start), Some(current)) => format_mb(current.saturating_sub(start)),
             _ => "n/a".into(),
         };
+        let mem = process_memory();
+        let rss_value = format_mb(mem.rss_bytes);
         let findings = findings
             .map(|value| value.to_string())
             .unwrap_or_else(|| "—".into());
         let line = format!(
-            "Executions {:>5} / {:<5}   Rate {:>7.1} exec/s   Elapsed {:>8}   I/O {:>8}   Findings {:>4}",
+            "Executions {:>5} / {:<5}   Rate {:>7.1} exec/s   RSS {:>7}   Elapsed {:>8}   I/O {:>8}   Findings {:>4}",
             self.completed,
             self.total,
             rate,
+            rss_value,
             format_duration(elapsed),
             io_value,
             findings,
@@ -389,6 +434,47 @@ fn format_mb(bytes: u64) -> String {
     } else {
         format!("{:.0} MB", bytes as f64 / 1_000_000.0)
     }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ProcessMemory {
+    pub rss_bytes: u64,
+    pub vm_bytes: u64,
+    pub swap_bytes: u64,
+}
+
+#[cfg(target_os = "linux")]
+pub fn process_memory() -> ProcessMemory {
+    let mut mem = ProcessMemory::default();
+    if let Ok(statm) = std::fs::read_to_string("/proc/self/statm") {
+        let parts: Vec<&str> = statm.split_whitespace().collect();
+        if parts.len() >= 2 {
+            let page_size = 4096u64;
+            if let Ok(vm_pages) = parts[0].parse::<u64>() {
+                mem.vm_bytes = vm_pages * page_size;
+            }
+            if let Ok(rss_pages) = parts[1].parse::<u64>() {
+                mem.rss_bytes = rss_pages * page_size;
+            }
+        }
+    }
+    if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+        for line in status.lines() {
+            if let Some(rest) = line.strip_prefix("VmSwap:") {
+                if let Some(kb_str) = rest.trim().strip_suffix("kB") {
+                    if let Ok(kb) = kb_str.trim().parse::<u64>() {
+                        mem.swap_bytes = kb * 1024;
+                    }
+                }
+            }
+        }
+    }
+    mem
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn process_memory() -> ProcessMemory {
+    ProcessMemory::default()
 }
 
 #[cfg(target_os = "linux")]
@@ -1081,5 +1167,47 @@ mod tests {
             Some("cpe:2.3:a:openbsd:openssh")
         );
         assert!(cpe_base("not-a-cpe").is_none());
+    }
+
+    #[test]
+    fn process_memory_returns_non_zero_rss_on_linux() {
+        let mem = process_memory();
+        #[cfg(target_os = "linux")]
+        assert!(mem.rss_bytes > 0);
+        let _ = mem.vm_bytes;
+        let _ = mem.swap_bytes;
+    }
+
+    #[test]
+    fn loader_cache_stats_track_hits_and_misses() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let plugin_file = temp_dir.path().join("test.nasl");
+        std::fs::write(&plugin_file, "display('ok');").unwrap();
+
+        let loader = Loader::from_feed_path(temp_dir.path());
+        let initial = loader.cache_stats();
+        assert_eq!(initial.entries, 0);
+        assert_eq!(initial.hits, 0);
+        assert_eq!(initial.misses, 0);
+
+        let code = loader.load("test.nasl").unwrap();
+        assert_eq!(code, "display('ok');");
+        let miss_stats = loader.cache_stats();
+        assert_eq!(miss_stats.entries, 1);
+        assert_eq!(miss_stats.hits, 0);
+        assert_eq!(miss_stats.misses, 1);
+        assert!(miss_stats.approximate_bytes > 0);
+
+        let cached = loader.load("test.nasl").unwrap();
+        assert_eq!(cached, "display('ok');");
+        let hit_stats = loader.cache_stats();
+        assert_eq!(hit_stats.entries, 1);
+        assert_eq!(hit_stats.hits, 1);
+        assert_eq!(hit_stats.misses, 1);
+
+        loader.clear_cache();
+        let cleared = loader.cache_stats();
+        assert_eq!(cleared.entries, 0);
+        assert_eq!(cleared.approximate_bytes, 0);
     }
 }

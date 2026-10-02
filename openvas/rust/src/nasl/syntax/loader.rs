@@ -97,6 +97,17 @@ where
 /// This trait exists as an abstraction to support loading NASL files
 /// from files (during normal operation) and from hardcoded strings
 /// (in some tests).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LoaderCacheStats {
+    pub entries: usize,
+    pub approximate_bytes: usize,
+    pub hits: u64,
+    pub misses: u64,
+}
+
+/// This trait exists as an abstraction to support loading NASL files
+/// from files (during normal operation) and from hardcoded strings
+/// (in some tests).
 trait NaslLoader: Sync + Send + NaslLoaderClone {
     /// Resolves the given filename to NASL code
     fn load(&self, filename: &str) -> Result<String, LoadError>;
@@ -105,6 +116,12 @@ trait NaslLoader: Sync + Send + NaslLoaderClone {
     fn root_path(&self) -> &Path;
 
     fn as_bufreader(&self, filename: &str) -> Result<Box<dyn BufRead>, LoadError>;
+
+    fn cache_stats(&self) -> LoaderCacheStats {
+        LoaderCacheStats::default()
+    }
+
+    fn clear_cache(&self) {}
 }
 
 #[derive(Clone)]
@@ -120,7 +137,7 @@ impl Loader {
             loader: Box::new({
                 FileSystemLoader {
                     root: path.as_ref().to_owned(),
-                    cache: Arc::new(Mutex::new(HashMap::new())),
+                    cache: Arc::new(Mutex::new(FileSystemLoaderCache::default())),
                 }
             }),
         }
@@ -161,6 +178,22 @@ impl Loader {
     pub(crate) fn as_bufreader(&self, filename: &str) -> Result<Box<dyn BufRead>, LoadError> {
         self.loader.as_bufreader(filename)
     }
+
+    pub fn cache_stats(&self) -> LoaderCacheStats {
+        self.loader.cache_stats()
+    }
+
+    pub fn clear_cache(&self) {
+        self.loader.clear_cache();
+    }
+}
+
+#[derive(Debug, Default)]
+struct FileSystemLoaderCache {
+    map: HashMap<String, Result<String, LoadError>>,
+    approximate_bytes: usize,
+    hits: u64,
+    misses: u64,
 }
 
 /// Loads files from the file system using paths relative to a root
@@ -173,19 +206,18 @@ struct FileSystemLoader {
     root: PathBuf,
     /// NASL source is immutable for the lifetime of a scan. Keep it in RAM so
     /// every VT and repeated include only pays the filesystem cost once.
-    cache: Arc<Mutex<HashMap<String, Result<String, LoadError>>>>,
+    cache: Arc<Mutex<FileSystemLoaderCache>>,
 }
 
 impl NaslLoader for FileSystemLoader {
     fn load(&self, filename: &str) -> Result<String, LoadError> {
-        if let Some(cached) = self
-            .cache
-            .lock()
-            .expect("NASL source cache mutex poisoned")
-            .get(filename)
-            .cloned()
         {
-            return cached;
+            let mut cache = self.cache.lock().expect("NASL source cache mutex poisoned");
+            if let Some(cached) = cache.map.get(filename).cloned() {
+                cache.hits += 1;
+                return cached;
+            }
+            cache.misses += 1;
         }
 
         let path = self.root.join(filename);
@@ -199,10 +231,14 @@ impl NaslLoader for FileSystemLoader {
             read_utf8_or_non_utf8_path(path.as_path())
         };
 
-        self.cache
-            .lock()
-            .expect("NASL source cache mutex poisoned")
-            .insert(filename.to_owned(), result.clone());
+        let mut cache = self.cache.lock().expect("NASL source cache mutex poisoned");
+        let entry_bytes = filename.len()
+            + match &result {
+                Ok(s) => s.len(),
+                Err(e) => e.filename().len(),
+            };
+        cache.approximate_bytes += entry_bytes;
+        cache.map.insert(filename.to_owned(), result.clone());
         result
     }
 
@@ -217,6 +253,22 @@ impl NaslLoader for FileSystemLoader {
             Ok(file) => Ok(Box::new(io::BufReader::new(file))),
             Err(e) => Err(e),
         }
+    }
+
+    fn cache_stats(&self) -> LoaderCacheStats {
+        let cache = self.cache.lock().expect("NASL source cache mutex poisoned");
+        LoaderCacheStats {
+            entries: cache.map.len(),
+            approximate_bytes: cache.approximate_bytes,
+            hits: cache.hits,
+            misses: cache.misses,
+        }
+    }
+
+    fn clear_cache(&self) {
+        let mut cache = self.cache.lock().expect("NASL source cache mutex poisoned");
+        cache.map.clear();
+        cache.approximate_bytes = 0;
     }
 }
 
@@ -245,6 +297,39 @@ mod tests {
         assert!(loader.load("missing.nasl").is_err());
         fs::write(directory.path().join("missing.nasl"), "now present").unwrap();
         assert!(loader.load("missing.nasl").is_err());
+    }
+
+    #[test]
+    fn filesystem_loader_tracks_cache_stats() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("foo.nasl");
+        fs::write(&path, "bar").unwrap();
+
+        let loader = Loader::from_feed_path(directory.path());
+        let initial_stats = loader.cache_stats();
+        assert_eq!(initial_stats.entries, 0);
+        assert_eq!(initial_stats.hits, 0);
+        assert_eq!(initial_stats.misses, 0);
+
+        let content = loader.load("foo.nasl").unwrap();
+        assert_eq!(content, "bar");
+        let stats_after_miss = loader.cache_stats();
+        assert_eq!(stats_after_miss.entries, 1);
+        assert_eq!(stats_after_miss.hits, 0);
+        assert_eq!(stats_after_miss.misses, 1);
+        assert!(stats_after_miss.approximate_bytes > 0);
+
+        let cached_content = loader.load("foo.nasl").unwrap();
+        assert_eq!(cached_content, "bar");
+        let stats_after_hit = loader.cache_stats();
+        assert_eq!(stats_after_hit.entries, 1);
+        assert_eq!(stats_after_hit.hits, 1);
+        assert_eq!(stats_after_hit.misses, 1);
+
+        loader.clear_cache();
+        let stats_after_clear = loader.cache_stats();
+        assert_eq!(stats_after_clear.entries, 0);
+        assert_eq!(stats_after_clear.approximate_bytes, 0);
     }
 }
 
