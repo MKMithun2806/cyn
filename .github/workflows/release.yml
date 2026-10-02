@@ -50,27 +50,63 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            use-cross: false
+            archives: native
+            archive: tar.gz
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             use-cross: false
+            archives: native
             archive: tar.gz
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             use-cross: true
-            archive: tar.gz
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            use-cross: false
-            archive: zip
-          - target: aarch64-apple-darwin
-            os: macos-14
-            use-cross: false
+            archives: arm64
             archive: tar.gz
 
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Cache static archives (krb5/libpcap)
+        id: cache-archives
+        uses: actions/cache@v4
+        with:
+          path: openvas/rust/crates/nasl-c-lib/build-cache
+          key: archives-${{ matrix.archives }}-${{ hashFiles('openvas/.docker/prod.Dockerfile', 'openvas/rust/crates/nasl-c-lib/Makefile', 'openvas/.docker/vendor/**') }}
+
+      - name: Set up QEMU (arm64 archive build)
+        if: matrix.archives == 'arm64' && steps.cache-archives.outputs.cache-hit != 'true'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Build static archives
+        if: steps.cache-archives.outputs.cache-hit != 'true'
+        run: |
+          set -eu
+          ARCHIVES_DIR=openvas/rust/crates/nasl-c-lib/build-cache/archives
+          if [ "${{ matrix.archives }}" = "native" ]; then
+            make -C openvas/rust/crates/nasl-c-lib
+          else
+            docker build \
+              --platform linux/arm64 \
+              -f openvas/.docker/prod.Dockerfile \
+              --target build-archives \
+              -t cyn-build-archives:arm64 \
+              openvas/
+            cid=$(docker create cyn-build-archives:arm64)
+            rm -rf "$ARCHIVES_DIR"
+            mkdir -p "$ARCHIVES_DIR"
+            docker cp "$cid:/archives/." "$ARCHIVES_DIR/"
+            docker rm "$cid"
+            docker rmi -f cyn-build-archives:arm64
+          fi
+          echo "Archives ready:"
+          ls -la "$ARCHIVES_DIR"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -119,6 +155,7 @@ jobs:
             musl-tools
 
       - name: Verify build flags
+        shell: bash
         run: |
           echo "Checking .cargo/config.toml..."
           cat .cargo/config.toml
@@ -159,18 +196,6 @@ jobs:
           else
             shasum -a 256 "$ASSET" > "${ASSET}.sha256"
           fi
-
-      - name: Package (windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $binary = "target/${{ matrix.target }}/release/cyn.exe"
-          $version = "${{ needs.version-check.outputs.version }}"
-          $archiveName = "cyn-${version}-${{ matrix.target }}.zip"
-          Compress-Archive -Path $binary -DestinationPath $archiveName
-          $hash = (Get-FileHash -Algorithm SHA256 $archiveName).Hash.ToLower()
-          Set-Content -Path "${archiveName}.sha256" -Value "$hash  $archiveName"
-          echo "ASSET=$archiveName" >> $env:GITHUB_ENV
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

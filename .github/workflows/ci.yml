@@ -27,6 +27,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      - name: Cache static archives (krb5/libpcap)
+        id: cache-archives
+        uses: actions/cache@v4
+        with:
+          path: openvas/rust/crates/nasl-c-lib/build-cache
+          key: archives-native-${{ hashFiles('openvas/.docker/prod.Dockerfile', 'openvas/rust/crates/nasl-c-lib/Makefile', 'openvas/.docker/vendor/**') }}
+      - name: Build static archives
+        if: steps.cache-archives.outputs.cache-hit != 'true'
+        run: make -C openvas/rust/crates/nasl-c-lib
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -61,6 +70,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      - name: Cache static archives (krb5/libpcap)
+        id: cache-archives
+        uses: actions/cache@v4
+        with:
+          path: openvas/rust/crates/nasl-c-lib/build-cache
+          key: archives-native-${{ hashFiles('openvas/.docker/prod.Dockerfile', 'openvas/rust/crates/nasl-c-lib/Makefile', 'openvas/.docker/vendor/**') }}
+      - name: Build static archives
+        if: steps.cache-archives.outputs.cache-hit != 'true'
+        run: make -C openvas/rust/crates/nasl-c-lib
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/cache@v4
         with:
