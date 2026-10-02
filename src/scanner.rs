@@ -1,5 +1,7 @@
+use std::io::{self, IsTerminal, Write};
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -172,6 +174,7 @@ pub async fn run_scan(
     let runner = ScanRunner::new(schedule, rx_target, &scan_ctx)
         .map_err(|e| CynError::Scanner(format!("failed to create scan runner: {e}")))?;
 
+    let mut progress = ScanProgress::new(scan.vts.len());
     let mut succeeded = 0u32;
     let mut failed = 0u32;
     let mut errors = 0u32;
@@ -180,6 +183,7 @@ pub async fn run_scan(
     let mut total_results = 0u32;
     while let Some(result) = stream.next().await {
         total_results += 1;
+        progress.update(total_results as usize);
         match result {
             Ok(script_result) => {
                 if script_result.has_succeeded() {
@@ -234,9 +238,118 @@ pub async fn run_scan(
         .filter_map(|r| result_to_finding(r, &vt_metadata, request.discovery.as_ref()))
         .collect();
 
+    progress.finish(findings.len());
     tracing::info!("findings after conversion: {}", findings.len());
 
     Ok(findings)
+}
+
+struct ScanProgress {
+    total: usize,
+    completed: usize,
+    started: Instant,
+    last_draw: Instant,
+    io_start: Option<u64>,
+    interactive: bool,
+}
+
+impl ScanProgress {
+    fn new(total: usize) -> Self {
+        let now = Instant::now();
+        let interactive = io::stderr().is_terminal();
+        if interactive {
+            eprintln!();
+            eprintln!("SCANNING");
+            eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        }
+        Self {
+            total,
+            completed: 0,
+            started: now,
+            last_draw: now.checked_sub(Duration::from_secs(1)).unwrap_or(now),
+            io_start: process_read_bytes(),
+            interactive,
+        }
+    }
+
+    fn update(&mut self, completed: usize) {
+        self.completed = completed;
+        if self.last_draw.elapsed() < Duration::from_millis(250) {
+            return;
+        }
+        self.last_draw = Instant::now();
+        self.draw(None);
+    }
+
+    fn finish(&mut self, findings: usize) {
+        self.completed = self.completed.max(self.total);
+        self.draw(Some(findings));
+        if self.interactive {
+            eprintln!();
+        }
+    }
+
+    fn draw(&self, findings: Option<usize>) {
+        let elapsed = self.started.elapsed();
+        let rate = self.completed as f64 / elapsed.as_secs_f64().max(0.001);
+        let io_value = match (self.io_start, process_read_bytes()) {
+            (Some(start), Some(current)) => format_mb(current.saturating_sub(start)),
+            _ => "n/a".into(),
+        };
+        let findings = findings
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "—".into());
+        let line = format!(
+            "VTs {:>5} / {:<5}   Rate {:>7.1} VT/s   Elapsed {:>8}   I/O {:>8}   Findings {:>4}",
+            self.completed,
+            self.total,
+            rate,
+            format_duration(elapsed),
+            io_value,
+            findings,
+        );
+
+        if self.interactive {
+            eprint!("\r\x1b[2K{line}");
+            let _ = io::stderr().flush();
+        } else if findings != "—" {
+            eprintln!("{line}");
+        }
+    }
+}
+
+fn format_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    let seconds = seconds % 60;
+    if hours > 0 {
+        format!("{hours}h {minutes:02}m")
+    } else {
+        format!("{minutes}m {seconds:02}s")
+    }
+}
+
+fn format_mb(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 {
+        format!("{:.1} GB", bytes as f64 / 1_000_000_000.0)
+    } else {
+        format!("{:.0} MB", bytes as f64 / 1_000_000.0)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn process_read_bytes() -> Option<u64> {
+    let contents = std::fs::read_to_string("/proc/self/io").ok()?;
+    contents.lines().find_map(|line| {
+        line.strip_prefix("read_bytes:")
+            .and_then(|value| value.trim().parse().ok())
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_read_bytes() -> Option<u64> {
+    None
 }
 
 /// Seed the OpenVAS knowledge base with facts already established by an
