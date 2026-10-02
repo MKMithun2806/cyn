@@ -225,11 +225,14 @@ pub async fn run_scan(
             last_telemetry = Instant::now();
             let mem = process_memory();
             let stats = loader.cache_stats();
+            let (socket_slots, open_sockets) = scan_ctx.socket_handle_counts().await;
             tracing::info!(
                 executions = total_results,
                 rss_mb = mem.rss_bytes / 1_000_000,
                 vm_mb = mem.vm_bytes / 1_000_000,
                 swap_mb = mem.swap_bytes / 1_000_000,
+                socket_slots,
+                open_sockets,
                 cache_entries = stats.entries,
                 cache_bytes_mb = stats.approximate_bytes / 1_000_000,
                 cache_hits = stats.hits,
@@ -266,11 +269,14 @@ pub async fn run_scan(
 
     let mem_final = process_memory();
     let stats_final = loader.cache_stats();
+    let (socket_slots, open_sockets) = scan_ctx.socket_handle_counts().await;
     tracing::info!(
         executions = total_results,
         rss_mb = mem_final.rss_bytes / 1_000_000,
         vm_mb = mem_final.vm_bytes / 1_000_000,
         swap_mb = mem_final.swap_bytes / 1_000_000,
+        socket_slots,
+        open_sockets,
         cache_entries = stats_final.entries,
         cache_bytes_mb = stats_final.approximate_bytes / 1_000_000,
         cache_hits = stats_final.hits,

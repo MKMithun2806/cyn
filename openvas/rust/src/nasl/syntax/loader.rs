@@ -415,7 +415,7 @@ impl Clone for Box<dyn NaslLoader> {
 }
 
 #[cfg(test)]
-mod tests {
+mod reader_tests {
     use std::io::Write;
 
     use super::*;

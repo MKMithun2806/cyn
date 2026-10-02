@@ -236,6 +236,11 @@ pub struct NaslSockets {
 }
 
 impl NaslSockets {
+    pub(crate) fn handle_counts(&self) -> (usize, usize) {
+        let open = self.handles.iter().filter(|handle| handle.is_some()).count();
+        (self.handles.len(), open)
+    }
+
     fn get_socket(&self, fd: usize) -> Result<&Option<NaslSocket>, SocketError> {
         self.handles
             .get(fd)
@@ -263,18 +268,7 @@ impl NaslSockets {
     /// Adds a given NASL socket. It returns the position of the socket within the
     /// list.
     fn add(&mut self, socket: NaslSocket) -> usize {
-        // Add a None element in the position 0, so the fd position
-        // is always greater than 0. This allows to check in the nasl side
-        if self.handles.is_empty() {
-            self.handles.push(None)
-        }
-        if let Some(free) = self.closed_fd.pop() {
-            self.handles.insert(free, Some(socket));
-            free
-        } else {
-            self.handles.push(Some(socket));
-            self.handles.len() - 1
-        }
+        add_to_handles(&mut self.handles, &mut self.closed_fd, socket)
     }
 
     /// Check if a new tcp request can be sent and waits if necessary.
@@ -346,6 +340,22 @@ impl NaslSockets {
         if let Some(to) = timeout {
             self.recv_timeout = Some(Duration::from_secs(to as u64));
         }
+    }
+}
+
+fn add_to_handles<T>(handles: &mut Vec<Option<T>>, closed_fd: &mut Vec<usize>, value: T) -> usize {
+    // Add a None element in position 0, so NASL descriptors start at 1.
+    if handles.is_empty() {
+        handles.push(None);
+    }
+    if let Some(free) = closed_fd.pop() {
+        // Handles are vector indexes: inserting shifts live handles and makes
+        // their NASL descriptor IDs stale. Reuse the slot in place instead.
+        handles[free] = Some(value);
+        free
+    } else {
+        handles.push(Some(value));
+        handles.len() - 1
     }
 }
 
@@ -1472,5 +1482,43 @@ impl DefineGlobalVars for SocketFns {
             ),
             ("ENCAPS_MAX", NaslValue::Number(OpenvasEncaps::Max.into())),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn socket_reuse_preserves_other_handles_and_bounds_table_growth() {
+        let mut handles = Vec::new();
+        let mut closed_fd = Vec::new();
+        let first = add_to_handles(&mut handles, &mut closed_fd, "first");
+        let second = add_to_handles(&mut handles, &mut closed_fd, "second");
+        assert_eq!((first, second), (1, 2));
+
+        handles[first] = None;
+        closed_fd.push(first);
+        let replacement = add_to_handles(&mut handles, &mut closed_fd, "replacement");
+        assert_eq!(replacement, first);
+
+        // Reusing a freed slot must not shift the still-open second socket's
+        // handle. Repeating that pattern must not grow the scan-wide table.
+        assert_eq!(handles[second], Some("second"));
+        handles[second] = None;
+        closed_fd.push(second);
+        handles[replacement] = None;
+        closed_fd.push(replacement);
+        assert_eq!(handles.len(), 3);
+        assert!(handles.iter().all(Option::is_none));
+
+        for _ in 0..256 {
+            let handle = add_to_handles(&mut handles, &mut closed_fd, "temporary");
+            assert_eq!(handle, replacement);
+            handles[handle] = None;
+            closed_fd.push(handle);
+            assert_eq!(handles.len(), 3);
+            assert!(handles.iter().all(Option::is_none));
+        }
     }
 }

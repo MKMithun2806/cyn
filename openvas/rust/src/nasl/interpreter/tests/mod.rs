@@ -27,7 +27,7 @@ fn interpret_err(file_name: &str, code: &str, version: NaslVersion) -> String {
         .unwrap()
         .unwrap_err();
     emit_errors_str(
-        &SimpleFile::new(file_name.to_string(), code.to_string()),
+        &SimpleFile::new(file_name.to_string(), code.to_string().into()),
         std::iter::once(&err),
     )
 }

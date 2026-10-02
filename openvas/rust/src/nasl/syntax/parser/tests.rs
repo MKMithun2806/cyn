@@ -31,7 +31,7 @@ fn parse_program_ok(file_name: &str, code: &str) -> Vec<Statement> {
     let results = Parser::new(tokens).parse_program();
     match results {
         Err(errs) => {
-            let file = SimpleFile::new(file_name.to_string(), code_str);
+            let file = SimpleFile::new(file_name.to_string(), code_str.into());
             emit_errors(&file, errs.into_iter());
             panic!("Errors during parsing");
         }
@@ -45,7 +45,7 @@ fn parse_program_err(file_name: &str, code: &str) -> String {
         .to_string();
     let tokens = Tokenizer::tokenize(&code);
     error::emit_errors_str(
-        &SimpleFile::new(file_name.to_string(), code.to_string()),
+        &SimpleFile::new(file_name.to_string(), code.to_string().into()),
         Parser::new(tokens).parse_program().unwrap_err().into_iter(),
     )
 }
@@ -56,7 +56,7 @@ fn parse_ok<T: Parse>(file_name: &str, code: &str) -> T {
 
 fn parse_err<T: Parse + Debug>(file_name: &str, code: &str) -> String {
     error::emit_errors_str(
-        &SimpleFile::new(file_name.to_string(), code.to_string()),
+        &SimpleFile::new(file_name.to_string(), code.to_string().into()),
         vec![parse::<T>(file_name, code).unwrap_err()].into_iter(),
     )
 }
