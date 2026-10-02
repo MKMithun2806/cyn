@@ -53,6 +53,11 @@ impl InMemoryStorage {
             ..Default::default()
         }
     }
+
+    /// Returns lightweight cardinality and approximate-allocation statistics for the KB.
+    pub fn kb_memory_stats(&self) -> Result<kb::KbMemoryStats, StorageError> {
+        self.kbs.memory_stats()
+    }
     fn to_nasl_key(oid: &str) -> (FeedType, String) {
         (FeedType::NASL, oid.to_string())
     }

@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: GPL-2.0-or-later WITH x11vnc-openssl-exception
 
-use std::{collections::HashMap, sync::RwLock};
+use std::{collections::HashMap, mem::size_of, sync::RwLock};
 
 use async_trait::async_trait;
 
@@ -20,8 +20,88 @@ type Kb = HashMap<KbKey, Vec<KbItem>>;
 /// make required_key verifications relatively simple.
 type Kbs = HashMap<KbContext, Kb>;
 
+/// Approximate size and cardinality of retained in-memory KB contents.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct KbMemoryStats {
+    pub keys: usize,
+    pub items: usize,
+    /// Approximate allocated bytes for value payloads and vector containers.
+    /// Key allocations and HashMap bucket/control-array overhead are not included.
+    pub approximate_bytes: usize,
+}
+
 #[derive(Debug, Default)]
 pub struct InMemoryKbStorage(RwLock<Kbs>);
+
+fn item_allocated_bytes(item: &KbItem) -> usize {
+    match item {
+        KbItem::String(value) => value.capacity(),
+        KbItem::Data(value) => value.capacity(),
+        KbItem::Array(values) => values
+            .capacity()
+            .saturating_mul(size_of::<KbItem>())
+            .saturating_add(values.iter().map(item_allocated_bytes).sum::<usize>()),
+        KbItem::Dict(values) => values
+            .capacity()
+            .saturating_mul(size_of::<(String, KbItem)>())
+            .saturating_add(
+                values
+                    .iter()
+                    .map(|(key, value)| key.capacity().saturating_add(item_allocated_bytes(value)))
+                    .sum::<usize>(),
+            ),
+        KbItem::Number(_) | KbItem::Boolean(_) | KbItem::Null => 0,
+    }
+}
+
+impl InMemoryKbStorage {
+    /// Measures retained KB contents while holding a shared lock, without cloning values.
+    pub fn memory_stats(&self) -> Result<KbMemoryStats, StorageError> {
+        let kbs = self.0.read()?;
+        let mut stats = KbMemoryStats::default();
+        for kb in kbs.values() {
+            for items in kb.values() {
+                stats.keys = stats.keys.saturating_add(1);
+                stats.items = stats.items.saturating_add(items.len());
+                stats.approximate_bytes = stats
+                    .approximate_bytes
+                    .saturating_add(items.capacity().saturating_mul(size_of::<KbItem>()))
+                    .saturating_add(items.iter().map(item_allocated_bytes).sum::<usize>());
+            }
+        }
+        Ok(stats)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::{Dispatcher, ScanID, Target};
+
+    #[tokio::test]
+    async fn memory_stats_count_appended_items_without_cloning_values() {
+        let storage = InMemoryKbStorage::default();
+        let key = KbContextKey(
+            (ScanID("scan".into()), Target("127.0.0.1".into())),
+            KbKey::Custom("test/key".into()),
+        );
+
+        storage
+            .dispatch(key.clone(), KbItem::String("small".into()))
+            .await
+            .unwrap();
+        let first = storage.memory_stats().unwrap();
+        assert_eq!((first.keys, first.items), (1, 1));
+
+        storage
+            .dispatch(key, KbItem::Data(vec![0; 256]))
+            .await
+            .unwrap();
+        let second = storage.memory_stats().unwrap();
+        assert_eq!((second.keys, second.items), (1, 2));
+        assert!(second.approximate_bytes >= first.approximate_bytes + 256);
+    }
+}
 
 #[async_trait]
 impl Dispatcher<KbContextKey> for InMemoryKbStorage {

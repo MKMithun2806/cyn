@@ -217,24 +217,39 @@ pub async fn run_scan(
     let mut stream = Box::pin(runner.stream());
     let mut total_results = 0usize;
     let mut last_telemetry = Instant::now();
+    let mut peak_rss = process_memory().rss_bytes;
+    let mut peak_execution = 0usize;
+    let mut peak_kb_stats = storage.kb_memory_stats().unwrap_or_default();
     while let Some(result) = stream.next().await {
         total_results += 1;
         progress.update(total_results);
 
-        if total_results % 500 == 0 || last_telemetry.elapsed() >= Duration::from_secs(10) {
+        // Sample once after each completed scheduled execution so a short-lived
+        // RSS increase can be attributed to an execution boundary.
+        let mem = process_memory();
+        if mem.rss_bytes > peak_rss {
+            peak_rss = mem.rss_bytes;
+            peak_execution = total_results;
+            peak_kb_stats = storage.kb_memory_stats().unwrap_or_default();
+        }
+
+        if total_results % 25 == 0 || last_telemetry.elapsed() >= Duration::from_secs(10) {
             last_telemetry = Instant::now();
-            let mem = process_memory();
             let stats = loader.cache_stats();
+            let kb_stats = storage.kb_memory_stats().unwrap_or_default();
             let (socket_slots, open_sockets) = scan_ctx.socket_handle_counts().await;
             tracing::info!(
                 executions = total_results,
-                rss_mb = mem.rss_bytes / 1_000_000,
-                vm_mb = mem.vm_bytes / 1_000_000,
-                swap_mb = mem.swap_bytes / 1_000_000,
+                rss_bytes = mem.rss_bytes,
+                vm_bytes = mem.vm_bytes,
+                swap_bytes = mem.swap_bytes,
+                kb_keys = kb_stats.keys,
+                kb_items = kb_stats.items,
+                kb_bytes = kb_stats.approximate_bytes,
                 socket_slots,
                 open_sockets,
                 cache_entries = stats.entries,
-                cache_bytes_mb = stats.approximate_bytes / 1_000_000,
+                cache_bytes = stats.approximate_bytes,
                 cache_hits = stats.hits,
                 cache_misses = stats.misses,
                 "memory/cache telemetry"
@@ -269,16 +284,25 @@ pub async fn run_scan(
 
     let mem_final = process_memory();
     let stats_final = loader.cache_stats();
+    let kb_stats_final = storage.kb_memory_stats().unwrap_or_default();
     let (socket_slots, open_sockets) = scan_ctx.socket_handle_counts().await;
     tracing::info!(
         executions = total_results,
-        rss_mb = mem_final.rss_bytes / 1_000_000,
-        vm_mb = mem_final.vm_bytes / 1_000_000,
-        swap_mb = mem_final.swap_bytes / 1_000_000,
+        rss_bytes = mem_final.rss_bytes,
+        vm_bytes = mem_final.vm_bytes,
+        swap_bytes = mem_final.swap_bytes,
+        peak_rss_bytes = peak_rss,
+        peak_after_execution = peak_execution,
+        peak_kb_keys = peak_kb_stats.keys,
+        peak_kb_items = peak_kb_stats.items,
+        peak_kb_bytes = peak_kb_stats.approximate_bytes,
+        kb_keys = kb_stats_final.keys,
+        kb_items = kb_stats_final.items,
+        kb_bytes = kb_stats_final.approximate_bytes,
         socket_slots,
         open_sockets,
         cache_entries = stats_final.entries,
-        cache_bytes_mb = stats_final.approximate_bytes / 1_000_000,
+        cache_bytes = stats_final.approximate_bytes,
         cache_hits = stats_final.hits,
         cache_misses = stats_final.misses,
         "scan execution complete: succeeded={succeeded}, failed={failed}, errors={errors}, total_stream_results={total_results}"
