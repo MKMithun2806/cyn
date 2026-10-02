@@ -118,13 +118,18 @@ pub async fn run_scan(
         .perform_update()
         .await
         .map_err(|e| CynError::Scanner(format!("feed update failed: {e}")))?;
+    let mem_before_clear = process_memory();
+    let stats_before_clear = loader.cache_stats();
+    loader.clear_cache();
     let mem_after_feed = process_memory();
     let stats_after_feed = loader.cache_stats();
     tracing::info!(
-        rss_mb = mem_after_feed.rss_bytes / 1_000_000,
-        cache_entries = stats_after_feed.entries,
-        cache_bytes_mb = stats_after_feed.approximate_bytes / 1_000_000,
-        "feed update complete"
+        rss_before_mb = mem_before_clear.rss_bytes / 1_000_000,
+        rss_after_mb = mem_after_feed.rss_bytes / 1_000_000,
+        cache_entries_cleared = stats_before_clear.entries,
+        cache_bytes_cleared_mb = stats_before_clear.approximate_bytes / 1_000_000,
+        cache_entries_retained = stats_after_feed.entries,
+        "feed update complete, bulk VT source cache cleared"
     );
     eprintln!("Feed ready.");
 
@@ -1209,5 +1214,13 @@ mod tests {
         let cleared = loader.cache_stats();
         assert_eq!(cleared.entries, 0);
         assert_eq!(cleared.approximate_bytes, 0);
+
+        // Verify that after clearing, subsequent loads successfully reload from disk on demand
+        let reloaded = loader.load("test.nasl").unwrap();
+        assert_eq!(reloaded, "display('ok');");
+        let reloaded_stats = loader.cache_stats();
+        assert_eq!(reloaded_stats.entries, 1);
+        assert_eq!(reloaded_stats.misses, 2);
+        assert_eq!(reloaded_stats.hits, 1);
     }
 }

@@ -267,7 +267,7 @@ impl NaslLoader for FileSystemLoader {
 
     fn clear_cache(&self) {
         let mut cache = self.cache.lock().expect("NASL source cache mutex poisoned");
-        cache.map.clear();
+        cache.map = HashMap::new();
         cache.approximate_bytes = 0;
     }
 }
