@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use codespan_reporting::files::SimpleFile;
 
@@ -23,7 +26,7 @@ fn parse_description_block(code: &str) -> Result<Ast, Vec<ParseError>> {
         .map_err(|e| vec![e])
 }
 
-pub type SourceFile = SimpleFile<String, String>;
+pub type SourceFile = SimpleFile<String, Arc<str>>;
 
 pub struct ParseResult {
     result: Result<Ast, Vec<ParseError>>,
@@ -31,17 +34,17 @@ pub struct ParseResult {
 }
 
 impl ParseResult {
-    fn new(code: &str, path: &Path) -> Self {
+    fn new(code: Arc<str>, path: &Path) -> Self {
         Self::new_with_parse_fn(code, path, parse)
     }
 
     fn new_with_parse_fn(
-        code: &str,
+        code: Arc<str>,
         path: &Path,
         f: impl Fn(&str) -> Result<Ast, Vec<ParseError>>,
     ) -> Self {
-        let file = SimpleFile::new(path.to_string_lossy().into(), code.to_owned());
-        let result = f(code);
+        let file = SimpleFile::new(path.to_string_lossy().into(), Arc::clone(&code));
+        let result = f(&code);
         Self { file, result }
     }
 
@@ -75,14 +78,14 @@ impl ParseResult {
 }
 
 pub struct Code {
-    code: String,
+    code: Arc<str>,
     path: Option<PathBuf>,
 }
 
 impl Code {
     pub fn load(loader: &Loader, path: impl AsRef<Path>) -> Result<Self, LoadError> {
         Ok(Self {
-            code: loader.load(&path.as_ref().to_string_lossy())?,
+            code: loader.load_shared(&path.as_ref().to_string_lossy())?,
             path: Some(path.as_ref().to_owned()),
         })
     }
@@ -90,13 +93,13 @@ impl Code {
     pub fn from_string(code: &str) -> Self {
         Self {
             path: None,
-            code: code.to_string(),
+            code: Arc::from(code),
         }
     }
 
     pub fn from_string_filename(code: &str, filename: impl AsRef<Path>) -> Self {
         Self {
-            code: code.to_string(),
+            code: Arc::from(code),
             path: Some(filename.as_ref().to_owned()),
         }
     }
@@ -107,7 +110,7 @@ impl Code {
             .as_ref()
             .map(|path| path.to_string_lossy().to_string())
             .unwrap_or("".to_string());
-        SimpleFile::new(path_str, self.code().to_owned())
+        SimpleFile::new(path_str, Arc::clone(&self.code))
     }
 
     #[cfg(test)]
@@ -119,10 +122,8 @@ impl Code {
     }
 
     pub fn parse(self) -> ParseResult {
-        match self.path {
-            Some(path) => ParseResult::new(&self.code, &path),
-            None => ParseResult::new(&self.code, Path::new("")),
-        }
+        let path = self.path.unwrap_or_else(|| Path::new("").to_owned());
+        ParseResult::new(self.code, &path)
     }
 
     pub fn file(&self) -> SourceFile {
@@ -131,13 +132,13 @@ impl Code {
                 .clone()
                 .map(|path| path.to_string_lossy().into())
                 .unwrap_or("".into()),
-            self.code.to_owned(),
+            Arc::clone(&self.code),
         )
     }
 
     pub fn parse_description_block(self) -> ParseResult {
         let path = self.path.unwrap_or(Path::new("").to_owned());
-        ParseResult::new_with_parse_fn(&self.code, &path, parse_description_block)
+        ParseResult::new_with_parse_fn(self.code, &path, parse_description_block)
     }
 
     pub fn code(&self) -> &str {
@@ -150,7 +151,7 @@ use tokenize::TokenizeResult;
 
 #[cfg(test)]
 mod tokenize {
-    use std::path::Path;
+    use std::{path::Path, sync::Arc};
 
     use codespan_reporting::files::SimpleFile;
     use itertools::{Either, Itertools};
@@ -178,7 +179,7 @@ mod tokenize {
 
     impl TokenizeResult {
         pub fn new(code: &str, path: &Path) -> Self {
-            let file = SimpleFile::new(path.to_string_lossy().into(), code.to_owned());
+            let file = SimpleFile::new(path.to_string_lossy().into(), Arc::from(code));
             let result = split_tokens_and_errors(Tokenizer::tokenize(code));
             Self { file, result }
         }

@@ -10,7 +10,6 @@ use crate::nasl::syntax::{CharIndex, ParseError};
 use crate::nasl::syntax::{Ident, LoadError};
 use crate::nasl::utils::error::FnError;
 use codespan_reporting::diagnostic::Diagnostic;
-use codespan_reporting::files::SimpleFile;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -123,7 +122,7 @@ impl InterpreterError {
 
     pub(crate) fn include_syntax_error(
         errs: Vec<ParseError>,
-        file: SimpleFile<String, String>,
+        file: SourceFile,
     ) -> Self {
         Self {
             // fake value since we don't need the span in this case

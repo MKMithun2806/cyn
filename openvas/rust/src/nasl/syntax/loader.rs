@@ -110,7 +110,7 @@ pub struct LoaderCacheStats {
 /// (in some tests).
 trait NaslLoader: Sync + Send + NaslLoaderClone {
     /// Resolves the given filename to NASL code
-    fn load(&self, filename: &str) -> Result<String, LoadError>;
+    fn load_shared(&self, filename: &str) -> Result<Arc<str>, LoadError>;
 
     /// Return the root plugins folder
     fn root_path(&self) -> &Path;
@@ -168,7 +168,13 @@ impl Loader {
     }
 
     pub fn load(&self, filename: &str) -> Result<String, LoadError> {
-        self.loader.load(filename)
+        self.loader
+            .load_shared(filename)
+            .map(|source| source.to_string())
+    }
+
+    pub(crate) fn load_shared(&self, filename: &str) -> Result<Arc<str>, LoadError> {
+        self.loader.load_shared(filename)
     }
 
     pub fn root_path(&self) -> &Path {
@@ -190,7 +196,7 @@ impl Loader {
 
 #[derive(Debug, Default)]
 struct FileSystemLoaderCache {
-    map: HashMap<String, Result<String, LoadError>>,
+    map: HashMap<String, Result<Arc<str>, LoadError>>,
     approximate_bytes: usize,
     hits: u64,
     misses: u64,
@@ -210,7 +216,7 @@ struct FileSystemLoader {
 }
 
 impl NaslLoader for FileSystemLoader {
-    fn load(&self, filename: &str) -> Result<String, LoadError> {
+    fn load_shared(&self, filename: &str) -> Result<Arc<str>, LoadError> {
         {
             let mut cache = self.cache.lock().expect("NASL source cache mutex poisoned");
             if let Some(cached) = cache.map.get(filename).cloned() {
@@ -221,14 +227,14 @@ impl NaslLoader for FileSystemLoader {
         }
 
         let path = self.root.join(filename);
-        let result = if !path.is_file() {
+        let result: Result<Arc<str>, LoadError> = if !path.is_file() {
             Err(LoadError::NotFound(format!(
                 "{} does not exist or is not accessible.",
                 path.as_os_str().to_str().unwrap_or_default()
             )))
         } else {
             // unfortunately nasl is still in iso-8859-1
-            read_utf8_or_non_utf8_path(path.as_path())
+            read_utf8_or_non_utf8_path(path.as_path()).map(Arc::from)
         };
 
         let mut cache = self.cache.lock().expect("NASL source cache mutex poisoned");
@@ -331,6 +337,21 @@ mod tests {
         assert_eq!(stats_after_clear.entries, 0);
         assert_eq!(stats_after_clear.approximate_bytes, 0);
     }
+
+    #[test]
+    fn shared_load_cache_hit_reuses_source_allocation() {
+        use std::sync::Arc;
+
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("shared.nasl"), "display('shared');").unwrap();
+        let loader = Loader::from_feed_path(directory.path());
+
+        let first = loader.load_shared("shared.nasl").unwrap();
+        let second = loader.load_shared("shared.nasl").unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(loader.load("shared.nasl").unwrap(), "display('shared');");
+    }
 }
 
 #[derive(Clone)]
@@ -339,12 +360,13 @@ pub struct TestLoader {
 }
 
 impl NaslLoader for TestLoader {
-    fn load(&self, filename: &str) -> Result<String, LoadError> {
+    fn load_shared(&self, filename: &str) -> Result<Arc<str>, LoadError> {
         Ok(self
             .files
             .get(filename)
             .ok_or_else(|| LoadError::NotFound(filename.into()))?
-            .clone())
+            .clone()
+            .into())
     }
 
     fn root_path(&self) -> &Path {
