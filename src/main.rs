@@ -8,6 +8,7 @@ mod feed;
 mod fingerprint;
 mod nmap;
 mod output;
+mod preflight;
 mod report;
 mod scanner;
 mod selection;
@@ -96,6 +97,25 @@ async fn run(cli: Cli) -> Result<(), error::CynError> {
         } => {
             if format == cli::OutputFormat::Terminal {
                 output::print_scan_start(&target);
+            }
+
+            match preflight::check_target(&target).await {
+                preflight::PreflightResult::Reachable => {
+                    eprintln!("  ✓ target responded to pre-scan reachability check");
+                }
+                preflight::PreflightResult::Unreachable(hosts) => {
+                    if !preflight::confirm_unreachable(&hosts)? {
+                        println!("\nScan cancelled before discovery.");
+                        return Ok(());
+                    }
+                    eprintln!("  → continuing after unreachable-target warning");
+                }
+                preflight::PreflightResult::Skipped => {
+                    eprintln!("  · pre-scan reachability check skipped for a target range/list");
+                }
+                preflight::PreflightResult::Unavailable(error) => {
+                    eprintln!("  · pre-scan reachability check unavailable: {error}");
+                }
             }
 
             let vt_oids = vt.map(|v| v.split(',').map(|s| s.trim().to_string()).collect());
