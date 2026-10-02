@@ -244,6 +244,31 @@ impl ServiceDetector {
         Ok(None)
     }
 
+    fn service_for_key(&self, key: &str, port: u16) -> Option<DetectedService> {
+        let matches_service = |service: &Service| {
+            service.name.eq_ignore_ascii_case(key)
+                || service
+                    .service_key
+                    .as_deref()
+                    .is_some_and(|service_key| service_key.eq_ignore_ascii_case(key))
+                || (service.name == "ssh" && key.to_ascii_lowercase().contains("ssh"))
+                || (service.name == "http" && key.to_ascii_lowercase().contains("http"))
+                || (service.name == "ftp" && key.to_ascii_lowercase().contains("ftp"))
+        };
+        let service = self
+            .services
+            .services
+            .iter()
+            .find(|service| matches_service(service) && service.ports.contains(&port))
+            .or_else(|| {
+                self.services.services.iter().find(|service| matches_service(service))
+            })?;
+        Some(DetectedService {
+            id: service.name.clone(),
+            banner: Vec::new(),
+        })
+    }
+
     async fn handle_detected_service(
         &self,
         script_ctx: &ScriptCtx<'_>,
@@ -311,7 +336,7 @@ async fn add_kb_entries(
         .set_kb_item(KbKey::KnownTcp(port), KbItem::String(service.key()))
         .await?;
 
-    if service.save_banner {
+    if service.save_banner && !banner.is_empty() {
         let banner_key = format!("Banner/{port}");
         script_ctx
             .set_kb_item(KbKey::Custom(banner_key), KbItem::Data(banner))
@@ -358,7 +383,16 @@ async fn read_from_tcp_at_port(
             buf.truncate(pos);
             Ok(ReadResult::Data(buf))
         }
-        Err(e) if e.kind() == io::ErrorKind::TimedOut => Ok(ReadResult::Timeout),
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+            ) =>
+        {
+            // On Unix, SO_RCVTIMEO may surface an expired read deadline as
+            // EAGAIN/EWOULDBLOCK rather than TimedOut.
+            Ok(ReadResult::Timeout)
+        }
         Err(e) => Err(SocketError::IO(e).into()),
     }
 }
@@ -468,7 +502,60 @@ async fn plugin_run_find_service(script_ctx: &ScriptCtx<'_>, register: &Register
 
     let detector = ServiceDetector::new()?;
     let open_ports = script_ctx.get_open_tcp_ports().await?;
+    let mut reused = 0usize;
+    let mut probed = 0usize;
+    let started = std::time::Instant::now();
     for port in open_ports {
+        let known = script_ctx
+            .get_kb_item(&KbKey::KnownTcp(port))
+            .await?
+            .into_iter()
+            .find_map(|item| match item {
+                KbItem::String(value)
+                    if is_known_service(&value) =>
+                {
+                    Some(value)
+                }
+                _ => None,
+            });
+        let banner = script_ctx
+            .get_kb_item(&KbKey::Banner(port))
+            .await?
+            .into_iter()
+            .find_map(|item| match item {
+                KbItem::String(value) => Some(value.into_bytes()),
+                KbItem::Data(value) => Some(value),
+                _ => None,
+            })
+            .filter(|banner| !banner.is_empty());
+
+        if let Some(known) = known.filter(|value| is_known_service(value)) {
+            reused += 1;
+            let detected = if let Some(banner) = banner.as_deref() {
+                detector.detect_service(banner, port)?
+            } else {
+                None
+            }
+            .or_else(|| detector.service_for_key(&known, port));
+            if let Some(service) = detected {
+                detector
+                    .handle_detected_service(script_ctx, service, port)
+                    .await?;
+            }
+            continue;
+        }
+
+        if let Some(banner) = banner {
+            reused += 1;
+            if let Some(service) = detector.detect_service(&banner, port)? {
+                detector
+                    .handle_detected_service(script_ctx, service, port)
+                    .await?;
+            }
+            continue;
+        }
+
+        probed += 1;
         match scan_port(script_ctx, &detector, script_ctx.target().ip_addr(), port).await {
             Ok(ScanPortResult::Service(service)) => {
                 detector
@@ -487,11 +574,26 @@ async fn plugin_run_find_service(script_ctx: &ScriptCtx<'_>, register: &Register
         }
     }
 
+    tracing::info!(
+        ports = reused + probed,
+        kb_reused = reused,
+        active_probes = probed,
+        elapsed_ms = started.elapsed().as_millis(),
+        "find_service lookup complete"
+    );
+
     Ok(NaslValue::Null)
 }
 
 #[derive(Default)]
 pub struct FindService;
+
+fn is_known_service(value: &str) -> bool {
+    !matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "" | "0" | "-" | "unknown" | "tcpwrapped"
+    )
+}
 
 function_set! {
     FindService,
@@ -510,5 +612,28 @@ mod tests {
         // creating the ServiceDetector
         let detector = ServiceDetector::new();
         detector.unwrap();
+    }
+
+    #[test]
+    fn maps_discovered_service_names_to_detector_entries() {
+        let detector = ServiceDetector::new().unwrap();
+
+        assert_eq!(detector.service_for_key("ssh", 22).unwrap().id, "ssh");
+        assert_eq!(detector.service_for_key("http", 80).unwrap().id, "http");
+        assert_eq!(detector.service_for_key("http", 8180).unwrap().id, "http");
+        assert_eq!(detector.service_for_key("ftp", 2121).unwrap().id, "ftp");
+        assert!(detector.service_for_key("rpcbind", 111).is_none());
+    }
+
+    #[test]
+    fn generic_nmap_labels_are_not_treated_as_service_identity() {
+        assert!(!is_known_service("unknown"));
+        assert!(!is_known_service("tcpwrapped"));
+        assert!(!is_known_service("-"));
+        assert!(!is_known_service(""));
+        assert!(!is_known_service("0"));
+        assert!(is_known_service("OpenSSH"));
+        assert!(is_known_service("http"));
+        assert!(is_known_service("login"));
     }
 }

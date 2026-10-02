@@ -353,7 +353,7 @@ impl ScanProgress {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "—".into());
         let line = format!(
-            "VTs {:>5} / {:<5}   Rate {:>7.1} VT/s   Elapsed {:>8}   I/O {:>8}   Findings {:>4}",
+            "Executions {:>5} / {:<5}   Rate {:>7.1} exec/s   Elapsed {:>8}   I/O {:>8}   Findings {:>4}",
             self.completed,
             self.total,
             rate,
@@ -456,7 +456,12 @@ async fn seed_discovery_kb(
                 .await?;
             }
 
-            if let Some(name) = service.service.as_deref().filter(|name| !name.is_empty()) {
+            if let Some(name) = service.service.as_deref().filter(|name| {
+                !name.is_empty()
+                    && !name.eq_ignore_ascii_case("-")
+                    && !name.eq_ignore_ascii_case("unknown")
+                    && !name.eq_ignore_ascii_case("tcpwrapped")
+            }) {
                 set_discovery_kb(
                     scan_ctx,
                     &context,
@@ -473,6 +478,30 @@ async fn seed_discovery_kb(
                     )
                     .await?;
                 }
+                if name.eq_ignore_ascii_case("http") || name.eq_ignore_ascii_case("https") {
+                    set_discovery_kb(
+                        scan_ctx,
+                        &context,
+                        kb::KbKey::Service(kb::Service::Custom("www".to_string())),
+                        KbItem::String(format!("{port}/{protocol}")),
+                    )
+                    .await?;
+                }
+            }
+
+            if let Some(banner) = service
+                .fingerprint
+                .as_ref()
+                .and_then(|fingerprint| fingerprint.banner.as_deref())
+                .filter(|banner| !banner.is_empty())
+            {
+                set_discovery_kb(
+                    scan_ctx,
+                    &context,
+                    kb::KbKey::Banner(service.port),
+                    KbItem::String(banner.to_owned()),
+                )
+                .await?;
             }
 
             if let Some(product) = service
