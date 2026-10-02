@@ -307,7 +307,11 @@ where
         self.lines.join("\n")
     }
 
-    fn interpreter<'ctx>(&self, code: &str, ctx: &'ctx ScanCtx) -> ForkingInterpreter<'ctx> {
+    pub(crate) fn interpreter<'ctx>(
+        &self,
+        code: &str,
+        ctx: &'ctx ScanCtx,
+    ) -> ForkingInterpreter<'ctx> {
         let variables: Vec<_> = self
             .variables
             .iter()

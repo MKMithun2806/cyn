@@ -79,10 +79,7 @@ impl<'a> ScanRunner<'a> {
     /// Each scheduler wave contains VTs that may run concurrently. A VT in a
     /// later wave, including an injected dependency, is a separate execution.
     pub fn scheduled_execution_count(&self) -> usize {
-        self.concurrent_vts
-            .iter()
-            .map(|(_, vts)| vts.len())
-            .sum()
+        self.concurrent_vts.iter().map(|(_, vts)| vts.len()).sum()
     }
 
     pub fn stream(self) -> impl Stream<Item = Result<ScriptResult, ExecuteError>> + 'a {
@@ -107,8 +104,12 @@ impl<'a> ScanRunner<'a> {
                     if let Some(pos) = queue.pop_front() {
                         let (stage, vts) = &concurrent_vts[pos.stage];
                         let (vt, param) = &vts[pos.vt];
-                        let result =
+                        let mut result =
                             VTRunner::run(pos.target, vt, *stage, param.as_ref(), scan_ctx).await;
+                        let rss_after_runner_bytes = super::vt_runner::current_rss_bytes();
+                        if let Ok(script_result) = &mut result {
+                            script_result.memory.rss_after_runner_bytes = rss_after_runner_bytes;
+                        }
                         return Some((result, (host_feed, queue)));
                     }
                 }

@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io::{self, IsTerminal, Write};
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -87,6 +88,40 @@ pub struct ScanRequest {
     pub exclude_hosts: Option<Vec<String>>,
     pub discovery: Option<DiscoveryResult>,
     pub profile_execution: bool,
+}
+
+struct ExecutionMemorySample {
+    execution: usize,
+    oid: String,
+    stage: String,
+    target: String,
+    port_hints: String,
+    rss_before_bytes: u64,
+    rss_after_bytes: u64,
+    rss_after_runner_bytes: u64,
+    rss_delta_bytes: i128,
+    elapsed_ms: u128,
+    kb_keys: usize,
+    kb_items: usize,
+    kb_bytes: usize,
+    cache_bytes: usize,
+    fork_reentry_peak_calls: usize,
+    fork_reentry_peak_bytes: usize,
+    fork_reentry_peak_rss_bytes: u64,
+}
+
+#[derive(Clone)]
+struct ExecutionBoundarySample {
+    execution: usize,
+    oid: String,
+    stage: String,
+    target: String,
+    port_hints: String,
+    rss_before_bytes: u64,
+    rss_after_bytes: u64,
+    rss_after_runner_bytes: u64,
+    rss_delta_bytes: i128,
+    elapsed_ms: u128,
 }
 
 pub async fn run_scan(
@@ -220,9 +255,43 @@ pub async fn run_scan(
     let mut peak_rss = process_memory().rss_bytes;
     let mut peak_execution = 0usize;
     let mut peak_kb_stats = storage.kb_memory_stats().unwrap_or_default();
+    let mut top_memory_deltas = Vec::<ExecutionMemorySample>::with_capacity(10);
+    let mut recent_boundaries = VecDeque::<ExecutionBoundarySample>::with_capacity(9);
+    let mut peak_boundary_window = Vec::<ExecutionBoundarySample>::new();
     while let Some(result) = stream.next().await {
         total_results += 1;
         progress.update(total_results);
+
+        if let Ok(script_result) = &result {
+            let delta = i128::from(script_result.memory.rss_after_bytes)
+                - i128::from(script_result.memory.rss_before_bytes);
+            let boundary = ExecutionBoundarySample {
+                execution: total_results,
+                oid: script_result.oid.clone(),
+                stage: script_result.stage.to_string(),
+                target: script_result.target.to_string(),
+                port_hints: if script_result.port_hints.is_empty() {
+                    "-".into()
+                } else {
+                    script_result.port_hints.join(",")
+                },
+                rss_before_bytes: script_result.memory.rss_before_bytes,
+                rss_after_bytes: script_result.memory.rss_after_bytes,
+                rss_after_runner_bytes: script_result.memory.rss_after_runner_bytes,
+                rss_delta_bytes: delta,
+                elapsed_ms: script_result.memory.elapsed.as_millis(),
+            };
+            recent_boundaries.push_back(boundary.clone());
+            if recent_boundaries.len() > 9 {
+                recent_boundaries.pop_front();
+            }
+            if peak_execution > 0
+                && total_results > peak_execution
+                && total_results <= peak_execution + 4
+            {
+                peak_boundary_window.push(boundary);
+            }
+        }
 
         // Sample once after each completed scheduled execution so a short-lived
         // RSS increase can be attributed to an execution boundary.
@@ -231,6 +300,7 @@ pub async fn run_scan(
             peak_rss = mem.rss_bytes;
             peak_execution = total_results;
             peak_kb_stats = storage.kb_memory_stats().unwrap_or_default();
+            peak_boundary_window = recent_boundaries.iter().cloned().collect();
         }
 
         if total_results % 25 == 0 || last_telemetry.elapsed() >= Duration::from_secs(10) {
@@ -258,6 +328,46 @@ pub async fn run_scan(
 
         match result {
             Ok(script_result) => {
+                let rss_delta_bytes = i128::from(script_result.memory.rss_after_bytes)
+                    - i128::from(script_result.memory.rss_before_bytes);
+                if top_memory_deltas.len() < 10
+                    || rss_delta_bytes
+                        > top_memory_deltas
+                            .last()
+                            .map(|sample| sample.rss_delta_bytes)
+                            .unwrap_or(i128::MIN)
+                {
+                    let kb_stats = storage.kb_memory_stats().unwrap_or_default();
+                    let cache_stats = loader.cache_stats();
+                    top_memory_deltas.push(ExecutionMemorySample {
+                        execution: total_results,
+                        oid: script_result.oid.clone(),
+                        stage: script_result.stage.to_string(),
+                        target: script_result.target.to_string(),
+                        port_hints: if script_result.port_hints.is_empty() {
+                            "-".into()
+                        } else {
+                            script_result.port_hints.join(",")
+                        },
+                        rss_before_bytes: script_result.memory.rss_before_bytes,
+                        rss_after_bytes: script_result.memory.rss_after_bytes,
+                        rss_after_runner_bytes: script_result.memory.rss_after_runner_bytes,
+                        rss_delta_bytes,
+                        elapsed_ms: script_result.memory.elapsed.as_millis(),
+                        kb_keys: kb_stats.keys,
+                        kb_items: kb_stats.items,
+                        kb_bytes: kb_stats.approximate_bytes,
+                        cache_bytes: cache_stats.approximate_bytes,
+                        fork_reentry_peak_calls: script_result.memory.fork_reentry_peak_calls,
+                        fork_reentry_peak_bytes: script_result.memory.fork_reentry_peak_bytes,
+                        fork_reentry_peak_rss_bytes: script_result
+                            .memory
+                            .fork_reentry_peak_rss_bytes,
+                    });
+                    top_memory_deltas
+                        .sort_by_key(|sample| std::cmp::Reverse(sample.rss_delta_bytes));
+                    top_memory_deltas.truncate(10);
+                }
                 phase_timings.add(script_result.timing);
                 if script_result.has_succeeded() {
                     succeeded += 1;
@@ -307,6 +417,43 @@ pub async fn run_scan(
         cache_misses = stats_final.misses,
         "scan execution complete: succeeded={succeeded}, failed={failed}, errors={errors}, total_stream_results={total_results}"
     );
+    for sample in &top_memory_deltas {
+        tracing::info!(
+            execution = sample.execution,
+            oid = %sample.oid,
+            stage = %sample.stage,
+            target = %sample.target,
+            port_hints = %sample.port_hints,
+            rss_before_bytes = sample.rss_before_bytes,
+            rss_after_bytes = sample.rss_after_bytes,
+            rss_after_runner_bytes = sample.rss_after_runner_bytes,
+            rss_delta_bytes = sample.rss_delta_bytes,
+            elapsed_ms = sample.elapsed_ms,
+            kb_keys = sample.kb_keys,
+            kb_items = sample.kb_items,
+            kb_bytes = sample.kb_bytes,
+            cache_bytes = sample.cache_bytes,
+            fork_reentry_peak_calls = sample.fork_reentry_peak_calls,
+            fork_reentry_peak_bytes = sample.fork_reentry_peak_bytes,
+            fork_reentry_peak_rss_bytes = sample.fork_reentry_peak_rss_bytes,
+            "top VT execution RSS delta"
+        );
+    }
+    for sample in &peak_boundary_window {
+        tracing::info!(
+            execution = sample.execution,
+            oid = %sample.oid,
+            stage = %sample.stage,
+            target = %sample.target,
+            port_hints = %sample.port_hints,
+            rss_before_bytes = sample.rss_before_bytes,
+            rss_after_bytes = sample.rss_after_bytes,
+            rss_after_runner_bytes = sample.rss_after_runner_bytes,
+            rss_delta_bytes = sample.rss_delta_bytes,
+            elapsed_ms = sample.elapsed_ms,
+            "VT execution around peak RSS boundary"
+        );
+    }
 
     let results = storage
         .remove(&ScanID(scan_id))

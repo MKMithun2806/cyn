@@ -89,6 +89,24 @@ pub struct ScriptResult {
     pub target: Host,
     /// Wall-clock time spent in major execution phases.
     pub timing: ExecutionTiming,
+    /// Process RSS snapshots measured immediately around this VT execution.
+    pub memory: ExecutionMemory,
+    /// Port requirements declared by the VT, if any. The runner schedules per
+    /// target, not per port, so these are hints rather than the actual socket port.
+    pub port_hints: Vec<String>,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ExecutionMemory {
+    pub rss_before_bytes: u64,
+    pub rss_after_bytes: u64,
+    /// RSS after the VTRunner future has returned to the ScanRunner.
+    pub rss_after_runner_bytes: u64,
+    /// Peak replay values retained by the interpreter within a NASL statement.
+    pub fork_reentry_peak_calls: usize,
+    pub fork_reentry_peak_bytes: usize,
+    pub fork_reentry_peak_rss_bytes: u64,
+    pub elapsed: Duration,
 }
 
 #[derive(Debug, Default, Clone, Copy)]

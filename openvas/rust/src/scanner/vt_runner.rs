@@ -10,6 +10,8 @@ use crate::nasl::utils::lookup_keys::SCRIPT_PARAMS;
 use crate::scheduling::Stage;
 use crate::storage::error::StorageError;
 use crate::storage::items::kb::{self, KbContext, KbContextKey, KbItem, KbKey};
+use std::time::Instant;
+
 use tracing::{trace, warn};
 
 use crate::nasl::prelude::*;
@@ -44,7 +46,37 @@ impl<'a> VTRunner<'a> {
 
             scan_ctx,
         };
-        s.execute().await
+        let port_hints = vt
+            .required_ports
+            .iter()
+            .map(|port| format!("tcp:{port}"))
+            .chain(
+                vt.required_udp_ports
+                    .iter()
+                    .map(|port| format!("udp:{port}")),
+            )
+            .collect();
+        let rss_before_bytes = current_rss_bytes();
+        let started = Instant::now();
+        let result = s.execute().await;
+        let elapsed = started.elapsed();
+        let rss_after_bytes = current_rss_bytes();
+        result.map(|mut script_result| {
+            let fork_reentry_peak_calls = script_result.memory.fork_reentry_peak_calls;
+            let fork_reentry_peak_bytes = script_result.memory.fork_reentry_peak_bytes;
+            let fork_reentry_peak_rss_bytes = script_result.memory.fork_reentry_peak_rss_bytes;
+            script_result.memory = super::error::ExecutionMemory {
+                rss_before_bytes,
+                rss_after_bytes,
+                rss_after_runner_bytes: 0,
+                fork_reentry_peak_calls,
+                fork_reentry_peak_bytes,
+                fork_reentry_peak_rss_bytes,
+                elapsed,
+            };
+            script_result.port_hints = port_hints;
+            script_result
+        })
     }
 
     fn set_parameters(&mut self, register: &mut Register) -> Result<(), ExecuteError> {
@@ -129,13 +161,7 @@ impl<'a> VTRunner<'a> {
         // sufficient to run the check. Requiring every entry made nearly all
         // vulnerability VTs exit before their NASL body executed.
         check_required_ports(&self.scan_ctx, &key, Protocol::TCP, &vt.required_ports).await?;
-        check_required_ports(
-            &self.scan_ctx,
-            &key,
-            Protocol::UDP,
-            &vt.required_udp_ports,
-        )
-        .await?;
+        check_required_ports(&self.scan_ctx, &key, Protocol::UDP, &vt.required_udp_ports).await?;
 
         Ok(())
     }
@@ -156,12 +182,12 @@ impl<'a> VTRunner<'a> {
         &self,
         code: Code,
         register: Register,
-    ) -> (ScriptResultKind, ExecutionTiming) {
+    ) -> (ScriptResultKind, ExecutionTiming, (usize, usize, u64)) {
         let mut timing = ExecutionTiming::default();
         let started = std::time::Instant::now();
         if let Err(e) = self.check_keys(self.vt).await {
             timing.prerequisites = started.elapsed();
-            return (e, timing);
+            return (e, timing, (0, 0, 0));
         }
         timing.prerequisites = started.elapsed();
         let script_ctx = ScriptCtx::new(self.scan_ctx, self.target, self.vt.clone());
@@ -172,21 +198,27 @@ impl<'a> VTRunner<'a> {
             return (
                 ScriptResultKind::Error(InterpreterError::syntax_error(errs)),
                 timing,
+                (0, 0, 0),
             );
         }
         let ast = ast.unwrap();
 
         let mut interpreter = ForkingInterpreter::new(ast, register, self.scan_ctx, script_ctx);
         let interpreter_started = std::time::Instant::now();
+        let mut peak_reentry = (0, 0, 0);
         while let Some(r) = interpreter.next().await {
+            let current_reentry = interpreter.peak_reentry_stats();
+            if current_reentry.1 > peak_reentry.1 {
+                peak_reentry = (current_reentry.0, current_reentry.1, current_rss_bytes());
+            }
             match r {
                 Ok(NaslValue::Exit(x)) => {
                     timing.interpreter = interpreter_started.elapsed();
-                    return (ScriptResultKind::ReturnCode(x), timing);
+                    return (ScriptResultKind::ReturnCode(x), timing, peak_reentry);
                 }
                 Err(e) => {
                     timing.interpreter = interpreter_started.elapsed();
-                    return (ScriptResultKind::Error(e), timing);
+                    return (ScriptResultKind::Error(e), timing, peak_reentry);
                 }
                 Ok(x) => {
                     trace!(statement_result=?x);
@@ -194,7 +226,7 @@ impl<'a> VTRunner<'a> {
             }
         }
         timing.interpreter = interpreter_started.elapsed();
-        (ScriptResultKind::ReturnCode(0), timing)
+        (ScriptResultKind::ReturnCode(0), timing, peak_reentry)
     }
 
     async fn execute(mut self) -> Result<ScriptResult, ExecuteError> {
@@ -206,7 +238,11 @@ impl<'a> VTRunner<'a> {
 
         // currently scans are limited to the target as well as the id.
         tracing::debug!("running");
-        let (kind, mut timing) = self.execute_inner(code, register).await;
+        let (
+            kind,
+            mut timing,
+            (fork_reentry_peak_calls, fork_reentry_peak_bytes, fork_reentry_peak_rss_bytes),
+        ) = self.execute_inner(code, register).await;
         timing.source_load = source_load;
         tracing::debug!(result=?kind, "finished");
         Ok(ScriptResult {
@@ -220,8 +256,34 @@ impl<'a> VTRunner<'a> {
                 .original_target_str()
                 .into(),
             timing,
+            memory: super::error::ExecutionMemory {
+                fork_reentry_peak_calls,
+                fork_reentry_peak_bytes,
+                fork_reentry_peak_rss_bytes,
+                ..Default::default()
+            },
+            port_hints: Vec::new(),
         })
     }
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn current_rss_bytes() -> u64 {
+    std::fs::read_to_string("/proc/self/statm")
+        .ok()
+        .and_then(|statm| {
+            statm
+                .split_whitespace()
+                .nth(1)
+                .and_then(|pages| pages.parse::<u64>().ok())
+        })
+        .unwrap_or_default()
+        .saturating_mul(4096)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn current_rss_bytes() -> u64 {
+    0
 }
 
 async fn check_required_ports(

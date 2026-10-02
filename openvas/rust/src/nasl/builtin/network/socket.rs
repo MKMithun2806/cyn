@@ -237,7 +237,11 @@ pub struct NaslSockets {
 
 impl NaslSockets {
     pub(crate) fn handle_counts(&self) -> (usize, usize) {
-        let open = self.handles.iter().filter(|handle| handle.is_some()).count();
+        let open = self
+            .handles
+            .iter()
+            .filter(|handle| handle.is_some())
+            .count();
         (self.handles.len(), open)
     }
 

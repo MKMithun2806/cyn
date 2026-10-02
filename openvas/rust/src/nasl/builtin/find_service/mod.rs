@@ -261,7 +261,10 @@ impl ServiceDetector {
             .iter()
             .find(|service| matches_service(service) && service.ports.contains(&port))
             .or_else(|| {
-                self.services.services.iter().find(|service| matches_service(service))
+                self.services
+                    .services
+                    .iter()
+                    .find(|service| matches_service(service))
             })?;
         Some(DetectedService {
             id: service.name.clone(),
@@ -511,11 +514,7 @@ async fn plugin_run_find_service(script_ctx: &ScriptCtx<'_>, register: &Register
             .await?
             .into_iter()
             .find_map(|item| match item {
-                KbItem::String(value)
-                    if is_known_service(&value) =>
-                {
-                    Some(value)
-                }
+                KbItem::String(value) if is_known_service(&value) => Some(value),
                 _ => None,
             });
         let banner = script_ctx

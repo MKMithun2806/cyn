@@ -15,6 +15,7 @@ pub struct ForkingInterpreter<'ctx> {
     interpreters: Vec<Interpreter<'ctx>>,
     interpreter_index: usize,
     ast: Ast,
+    peak_reentry_stats: (usize, usize),
 }
 
 impl<'ctx> ForkingInterpreter<'ctx> {
@@ -30,6 +31,7 @@ impl<'ctx> ForkingInterpreter<'ctx> {
             interpreters,
             interpreter_index: 0,
             ast,
+            peak_reentry_stats: (0, 0),
         }
     }
 
@@ -44,6 +46,19 @@ impl<'ctx> ForkingInterpreter<'ctx> {
             result?;
         }
         Ok(())
+    }
+
+    pub fn retained_reentry_stats(&self) -> (usize, usize) {
+        self.interpreters
+            .iter()
+            .map(Interpreter::retained_reentry_stats)
+            .fold((0, 0), |(count, bytes), (next_count, next_bytes)| {
+                (count + next_count, bytes + next_bytes)
+            })
+    }
+
+    pub fn peak_reentry_stats(&self) -> (usize, usize) {
+        self.peak_reentry_stats
     }
 
     #[cfg(test)]
@@ -97,7 +112,12 @@ impl<'ctx> ForkingInterpreter<'ctx> {
         // remove and re-insert the interpreter on every statement,
         // even if the statement does not create a fork, which
         // might cause performance issues.
-        if self.interpreters[self.interpreter_index].wants_to_fork() {
+        let interpreter = &self.interpreters[self.interpreter_index];
+        let reentry_stats = interpreter.retained_reentry_stats();
+        if reentry_stats.1 > self.peak_reentry_stats.1 {
+            self.peak_reentry_stats = reentry_stats;
+        }
+        if interpreter.wants_to_fork() {
             let interpreter = self.interpreters.remove(self.interpreter_index);
             let forks = interpreter.make_forks();
             // Insert the new interpreters in order and "in place", so
@@ -115,6 +135,7 @@ impl<'ctx> ForkingInterpreter<'ctx> {
                 (self.interpreter_index + num_forks - 1) % self.interpreters.len();
             true
         } else {
+            self.interpreters[self.interpreter_index].complete_statement_without_fork();
             false
         }
     }
@@ -162,6 +183,23 @@ mod tests {
         assert_eq!(
             t.values(),
             vec![NaslValue::Null, NaslValue::Null, 1.into(), 2.into()]
+        );
+    }
+
+    #[test]
+    fn replay_safe_call_result_remains_usable() {
+        let t = TestBuilder::from_code(
+            r#"
+            values = make_list("first", "second");
+            values[0];
+            "#,
+        );
+        assert_eq!(
+            t.values(),
+            vec![
+                NaslValue::Array(vec!["first".into(), "second".into()]),
+                "first".into(),
+            ]
         );
     }
 
@@ -404,6 +442,77 @@ mod tests {
                 NaslValue::Return(Box::new(NaslValue::Number(2)))
             ]
         );
+    }
+
+    #[test]
+    fn cached_result_survives_fork_replay() {
+        let mut exec = nasl_std_executor();
+        exec.add_set(MySet(0));
+        let mut t = TestBuilder::default().with_executor(exec);
+        t.run_all(
+            r#"
+            set_kb_item(name: "choice", value: 100);
+            set_kb_item(name: "choice", value: 200);
+            rand_sim() + get_kb_item("choice");
+            "#,
+        );
+
+        assert_eq!(
+            t.values(),
+            vec![NaslValue::Null, NaslValue::Null, 100.into(), 200.into(),]
+        );
+    }
+
+    #[test]
+    fn completed_sequential_calls_release_replay_results() {
+        let mut exec = nasl_std_executor();
+        exec.add_set(MySet(0));
+        let t = TestBuilder::default().with_executor(exec);
+        let ctx = t.ctx();
+        let mut interpreter = t.interpreter("rand_sim(); rand_sim();", &ctx);
+
+        futures::executor::block_on(async {
+            assert_eq!(interpreter.next().await.unwrap().unwrap(), 0.into());
+            assert_eq!(interpreter.retained_reentry_stats(), (0, 0));
+            assert_eq!(interpreter.next().await.unwrap().unwrap(), 1.into());
+            assert_eq!(interpreter.retained_reentry_stats(), (0, 0));
+        });
+    }
+
+    #[test]
+    fn repeated_large_array_calls_keep_replay_data_bounded() {
+        let t = TestBuilder::default();
+        let ctx = t.ctx();
+        let mut interpreter = t.interpreter(
+            r#"
+            function build_large() {
+                local_var i, values;
+                values = make_list();
+                for (i = 0; i < 512; i++) {
+                    values = make_list(values, "x");
+                }
+                return values;
+            }
+            result = build_large();
+            max_index(result);
+            "#,
+            &ctx,
+        );
+
+        futures::executor::block_on(async {
+            interpreter.next().await.unwrap().unwrap();
+            let result = interpreter.next().await.unwrap().unwrap();
+            assert!(matches!(result, NaslValue::Array(ref values) if values.len() == 512));
+            let (calls, bytes) = interpreter.peak_reentry_stats();
+            assert!(calls <= 1, "unexpected replay entries: {calls}");
+            assert!(
+                bytes < 32 * 1024,
+                "unexpected replay payload: {bytes} bytes"
+            );
+            assert_eq!(interpreter.retained_reentry_stats(), (0, 0));
+            assert_eq!(interpreter.next().await.unwrap().unwrap(), 512.into());
+            assert_eq!(interpreter.retained_reentry_stats(), (0, 0));
+        });
     }
 
     #[test]

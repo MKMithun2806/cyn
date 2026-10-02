@@ -200,6 +200,19 @@ impl ForkReentryData {
             ForkReentryData::Restoring { data } => data.is_empty(),
         }
     }
+
+    fn retained_value_stats(&self) -> (usize, usize) {
+        let mut stats = (0, 0);
+        let mut add_call = |call: &FunctionCallData| {
+            stats.0 += 1;
+            stats.1 += call.value.approximate_heap_bytes();
+        };
+        match self {
+            Self::Collecting { data, .. } => data.iter().for_each(&mut add_call),
+            Self::Restoring { data } => data.iter().for_each(&mut add_call),
+        }
+        stats
+    }
 }
 
 /// Expand the first occurrence of `NaslValue::Fork(...)` in the list of collected function
@@ -589,6 +602,14 @@ impl<'ctx> Interpreter<'ctx> {
             self.fork_reentry_data =
                 ForkReentryData::collecting(self.register.clone(), self.stmt_index);
         }
+    }
+
+    pub(crate) fn retained_reentry_stats(&self) -> (usize, usize) {
+        self.fork_reentry_data.retained_value_stats()
+    }
+
+    pub(crate) fn complete_statement_without_fork(&mut self) {
+        self.fork_reentry_data = ForkReentryData::new();
     }
 
     pub(crate) fn is_finished(&self) -> bool {

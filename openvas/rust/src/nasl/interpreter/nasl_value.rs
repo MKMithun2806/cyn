@@ -107,6 +107,44 @@ impl From<Fork> for NaslValue {
 }
 
 impl NaslValue {
+    pub(crate) fn approximate_heap_bytes(&self) -> usize {
+        match self {
+            Self::String(value) => value.capacity(),
+            Self::Data(value) => value.capacity(),
+            Self::Array(values) => {
+                std::mem::size_of::<NaslValue>() * values.capacity()
+                    + values
+                        .iter()
+                        .map(Self::approximate_heap_bytes)
+                        .sum::<usize>()
+            }
+            Self::Dict(values) => {
+                values.capacity()
+                    * (std::mem::size_of::<String>() + std::mem::size_of::<NaslValue>())
+                    + values
+                        .iter()
+                        .map(|(key, value)| key.capacity() + value.approximate_heap_bytes())
+                        .sum::<usize>()
+            }
+            Self::Return(value) => value.approximate_heap_bytes(),
+            Self::Fork(value) => {
+                std::mem::size_of::<NaslValue>() * value.values.capacity()
+                    + value
+                        .values
+                        .iter()
+                        .map(Self::approximate_heap_bytes)
+                        .sum::<usize>()
+            }
+            Self::Number(_)
+            | Self::Boolean(_)
+            | Self::AttackCategory(_)
+            | Self::Null
+            | Self::Continue
+            | Self::Break
+            | Self::Exit(_) => 0,
+        }
+    }
+
     /// Transform NASLValue to storage::types::Primitive
     pub fn as_kb(self) -> KbItem {
         use KbItem::*;

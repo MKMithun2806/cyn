@@ -117,11 +117,14 @@ impl Interpreter<'_> {
         let mut val = NaslValue::Null;
         for _ in 0..num_repeats {
             let span = call.fn_name.span();
-            if let Some((val, kind)) = self.fork_reentry_data.try_restore(&span)? {
-                if let Some(kind) = kind {
-                    self.fork_history.insert(kind, val.clone());
+            let replay_safe = is_replay_safe_builtin(call.fn_name.to_str());
+            if !replay_safe {
+                if let Some((val, kind)) = self.fork_reentry_data.try_restore(&span)? {
+                    if let Some(kind) = kind {
+                        self.fork_history.insert(kind, val.clone());
+                    }
+                    return Ok(val);
                 }
-                return Ok(val);
             }
             let arguments = self.create_arguments_map(call.args.as_ref()).await?;
             self.register.create_global_child(arguments);
@@ -131,10 +134,18 @@ impl Interpreter<'_> {
             }?;
             self.register.drop_last();
             val = replace_empty_or_identity_fork(val);
-            self.fork_reentry_data.try_collect(val.clone(), &span);
+            if !replay_safe {
+                self.fork_reentry_data.try_collect(val.clone(), &span);
+            }
         }
         Ok(val)
     }
+}
+
+/// These builtins are deterministic and side-effect free, so replay can safely
+/// recompute their result instead of retaining potentially large values.
+fn is_replay_safe_builtin(name: &str) -> bool {
+    matches!(name, "make_list" | "max_index" | "typeof")
 }
 
 fn replace_empty_or_identity_fork(mut val: NaslValue) -> NaslValue {

@@ -120,10 +120,7 @@ impl InterpreterError {
         }
     }
 
-    pub(crate) fn include_syntax_error(
-        errs: Vec<ParseError>,
-        file: SourceFile,
-    ) -> Self {
+    pub(crate) fn include_syntax_error(errs: Vec<ParseError>, file: SourceFile) -> Self {
         Self {
             // fake value since we don't need the span in this case
             span: Span::new(CharIndex(usize::MAX - 1), CharIndex(usize::MAX)),
