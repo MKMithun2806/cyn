@@ -464,7 +464,7 @@ mod tests {
         );
         data.tag.insert(models::TagKey::Affected, "< 10.5".into());
         let metadata = HashMap::from([(candidate.oid.clone(), data.clone())]);
-        let (selected, _) = select_vts(&[candidate.clone()], &metadata, &context());
+        let (selected, _) = select_vts(std::slice::from_ref(&candidate), &metadata, &context());
         assert_eq!(selected.len(), 1);
 
         let fixed_context = SelectionContext::from_discovery(&DiscoveryResult {
