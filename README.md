@@ -24,19 +24,6 @@ and C library (musl vs glibc), picks the matching binary from the
 needed). If your platform has no published build it says so explicitly,
 lists the supported targets, and points you at the source build.
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/MKMithun2806/cyn/main/install.py | python3 - --help
-```
-
-| Flag | Description |
-|------|-------------|
-| `--version <X.Y.Z>` | Install a specific release instead of the latest |
-| `--install-dir <DIR>` | Install location (default `~/.local/bin`, env `CYN_INSTALL_DIR`) |
-| `--no-modify-path` | Never edit shell rc files; print the `export PATH` line instead |
-
-Alternatives: [pre-built release archives](docs/INSTALL.md#pre-built-binaries) ·
-[build from source](docs/INSTALL.md#build-from-source)
-
 ## Quick start
 
 ```sh
