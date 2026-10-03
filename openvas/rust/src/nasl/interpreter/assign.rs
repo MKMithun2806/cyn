@@ -15,6 +15,7 @@ use crate::nasl::syntax::grammar::Increment;
 use crate::nasl::syntax::grammar::IncrementKind;
 use crate::nasl::syntax::grammar::IncrementOperatorKind;
 use crate::nasl::syntax::grammar::PlaceExpr;
+use crate::nasl::syntax::grammar::{Atom, Expr, FnArg, FnCall};
 
 use super::Interpreter;
 use super::NaslValue;
@@ -82,6 +83,22 @@ fn assign(
     }
 }
 
+fn expr_may_mutate(expr: &Expr) -> bool {
+    match expr {
+        Expr::Atom(atom) => match atom {
+            Atom::Array(array) => array.items.items.iter().any(expr_may_mutate),
+            Atom::ArrayAccess(access) => {
+                expr_may_mutate(&access.lhs_expr) || expr_may_mutate(&access.index_expr)
+            }
+            Atom::FnCall(_) | Atom::Increment(_) => true,
+            Atom::Literal(_) | Atom::Ident(_) => false,
+        },
+        Expr::Binary(binary) => expr_may_mutate(&binary.lhs) || expr_may_mutate(&binary.rhs),
+        Expr::Unary(unary) => expr_may_mutate(&unary.rhs),
+        Expr::Assignment(_) => true,
+    }
+}
+
 impl Interpreter<'_> {
     async fn eval_place_expr<'a>(
         &mut self,
@@ -92,9 +109,114 @@ impl Interpreter<'_> {
         Ok((var, indices))
     }
 
-    pub(crate) async fn resolve_assignment(&mut self, assignment: &Assignment) -> Result {
+    fn self_append_call<'a>(&self, assignment: &'a Assignment) -> Option<&'a FnCall> {
+        if !matches!(assignment.op.kind, AssignmentOperatorKind::Equal)
+            || assignment.lhs.negate
+            || !assignment.lhs.array_accesses.is_empty()
+        {
+            return None;
+        }
+
+        let Expr::Atom(Atom::FnCall(call)) = assignment.rhs.as_ref() else {
+            return None;
+        };
+        if call.fn_name.to_str() != "make_list" || call.num_repeats.is_some() {
+            return None;
+        }
+
+        let Some(FnArg::Anonymous(first_arg)) = call.args.items.first() else {
+            return None;
+        };
+        let Expr::Atom(Atom::Ident(first_ident)) = first_arg.expr.as_ref() else {
+            return None;
+        };
+        if first_ident.to_str() != assignment.lhs.ident.to_str()
+            || call
+                .args
+                .items
+                .iter()
+                .any(|arg| !matches!(arg, FnArg::Anonymous(_)))
+        {
+            return None;
+        }
+
+        Some(call)
+    }
+
+    async fn resolve_self_append(&mut self, assignment: &Assignment, call: &FnCall) -> Result {
+        let Some(var) = self.register.get(assignment.lhs.ident.to_str()) else {
+            return self.resolve_assignment_normally(assignment).await;
+        };
+        if !matches!(
+            self.register
+                .get_val(var)
+                .as_value()
+                .map_err(|e| e.with_span(&assignment.lhs.ident))?,
+            NaslValue::Array(_)
+        ) {
+            return self.resolve_assignment_normally(assignment).await;
+        }
+
+        // Resolve all arguments before borrowing the LHS mutably. This preserves the
+        // order and ensures later arguments still observe the pre-assignment value. If
+        // an argument may mutate the LHS, retain the first argument's normal snapshot
+        // so that such a mutation cannot change the value being appended.
+        let preserve_original = call.args.items.iter().skip(1).any(|arg| {
+            let FnArg::Anonymous(arg) = arg else {
+                unreachable!("self_append_call checked argument kinds");
+            };
+            expr_may_mutate(&arg.expr)
+        });
+        let original = if preserve_original {
+            let FnArg::Anonymous(first_arg) = &call.args.items[0] else {
+                unreachable!("self_append_call checked argument kinds");
+            };
+            Some(self.resolve_expr(&first_arg.expr).await?)
+        } else {
+            None
+        };
+        let mut appended = Vec::new();
+        for arg in call.args.items.iter().skip(1) {
+            let FnArg::Anonymous(arg) = arg else {
+                unreachable!("self_append_call checked argument kinds");
+            };
+            match self.resolve_expr(&arg.expr).await? {
+                NaslValue::Array(values) => appended.extend(values),
+                NaslValue::Dict(values) => appended.extend(values.into_values()),
+                NaslValue::Null => {}
+                value => appended.push(value),
+            }
+        }
+
+        let lhs = self
+            .register
+            .get_val_mut(var)
+            .as_value_mut()
+            .map_err(|e| e.with_span(&assignment.lhs.ident))?;
+        if let Some(NaslValue::Array(mut values)) = original {
+            values.extend(appended);
+            *lhs = NaslValue::Array(values);
+        } else {
+            lhs.as_array_mut()
+                .expect("self-append LHS was checked to be an array")
+                .extend(appended);
+        }
+        Ok(lhs.clone())
+    }
+
+    async fn resolve_assignment_normally(&mut self, assignment: &Assignment) -> Result {
         let rhs = self.resolve_expr(&assignment.rhs).await?;
         let (var, indices) = self.eval_place_expr(&assignment.lhs).await?;
+        self.assign_resolved(assignment, rhs, var, indices)
+    }
+
+    fn assign_resolved(
+        &mut self,
+        assignment: &Assignment,
+        rhs: NaslValue,
+        var: Option<Var<'_>>,
+        indices: Vec<NaslValue>,
+    ) -> Result {
         let var = match var {
             None => {
                 // If the variable could not be found in the current scope,
@@ -140,6 +262,14 @@ impl Interpreter<'_> {
         } else {
             Ok(val)
         }
+    }
+
+    pub(crate) async fn resolve_assignment(&mut self, assignment: &Assignment) -> Result {
+        if let Some(call) = self.self_append_call(assignment) {
+            return self.resolve_self_append(assignment, call).await;
+        }
+
+        self.resolve_assignment_normally(assignment).await
     }
 
     pub(crate) async fn resolve_increment(&mut self, increment: &Increment) -> Result {
@@ -236,6 +366,55 @@ mod tests {
     );
 
     interpreter_test_ok!(array_creation, "a = [1, 2, 3];", vec![1, 2, 3]);
+
+    interpreter_test_ok!(
+        self_append_make_list,
+        "a = [1, 2]; a = make_list(a, 3); a;",
+        vec![1, 2],
+        vec![1, 2, 3],
+        vec![1, 2, 3],
+    );
+
+    interpreter_test_ok!(
+        self_append_multiple_make_list,
+        "a = [1]; a = make_list(a, 2, 3, 4); a;",
+        vec![1],
+        vec![1, 2, 3, 4],
+        vec![1, 2, 3, 4],
+    );
+
+    interpreter_test_ok!(
+        make_list_copy,
+        "a = [1, 2]; b = make_list(a, 3); a; b;",
+        vec![1, 2],
+        vec![1, 2, 3],
+        vec![1, 2],
+        vec![1, 2, 3],
+    );
+
+    interpreter_test_ok!(
+        self_only_make_list,
+        "a = [1, 2]; a = make_list(a); a;",
+        vec![1, 2],
+        vec![1, 2],
+        vec![1, 2],
+    );
+
+    interpreter_test_ok!(
+        self_append_preserves_snapshot,
+        "a = [1]; a = make_list(a, a = [9]); a;",
+        vec![1],
+        vec![1, 9],
+        vec![1, 9],
+    );
+
+    interpreter_test_ok!(
+        non_array_make_list_falls_back,
+        "a = 1; a = make_list(a, 2); a;",
+        1,
+        vec![1, 2],
+        vec![1, 2],
+    );
 
     interpreter_test_ok!(assign_negate, "!a = FALSE;", true);
 
