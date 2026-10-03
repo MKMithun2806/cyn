@@ -108,6 +108,16 @@ jobs:
           echo "Archives ready:"
           ls -la "$ARCHIVES_DIR"
 
+      - name: Install capnp in cross container
+        if: matrix.use-cross
+        run: |
+          set -eu
+          IMAGE=ghcr.io/cross-rs/aarch64-unknown-linux-musl:main
+          mkdir -p /tmp/capnp-patch
+          printf 'FROM %s\nRUN apt-get update && apt-get install -y --no-install-recommends capnproto && rm -rf /var/lib/apt/lists/*\n' "$IMAGE" > /tmp/capnp-patch/Dockerfile
+          docker build -t "$IMAGE" /tmp/capnp-patch
+          docker run --rm --entrypoint /bin/sh "$IMAGE" -c 'capnp --version'
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -128,6 +138,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             cmake \
+            capnproto \
             libpcap-dev \
             libsnmp-dev \
             libssl-dev \
@@ -144,6 +155,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             cmake \
+            capnproto \
             libpcap-dev \
             libsnmp-dev \
             libssl-dev \

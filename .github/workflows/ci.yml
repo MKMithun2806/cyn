@@ -53,6 +53,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             cmake \
+            capnproto \
             libpcap-dev \
             libsnmp-dev \
             libssl-dev \
@@ -94,6 +95,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             cmake \
+            capnproto \
             libpcap-dev \
             libsnmp-dev \
             libssl-dev \
