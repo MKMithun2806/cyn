@@ -213,6 +213,9 @@ directly in this repository. It is intentionally tracked as a normal
 directory so Cyn can carry the local compatibility fixes it needs without
 depending on a separate submodule commit.
 
-## License
+## Licensing & Third-Party Code
 
-GPL-2.0-or-later — see [LICENSE](LICENSE).
+This project is licensed under the **GNU General Public License v2.0 or later** (GPL-2.0-or-later). See the [LICENSE](LICENSE) file for details.
+
+### Vendored Dependencies
+* **OpenVAS / Greenbone Community Edition:** Located under `openvas/`. Retains its original GPL-2.0-only, GPL-2.0-or-later, OpenSSL exception, and MIT terms as specified in `openvas/COPYING` and `openvas/license-details.md`. Third-party file-level licensing terms remain applicable to those components.

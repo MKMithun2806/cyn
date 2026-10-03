@@ -1,28 +1,7 @@
-GNU GENERAL PUBLIC LICENSE
-Version 2, or (at your option) any later version
-
-Cyn is licensed under the GNU General Public License version 2.0 or
-(at your option) any later version.
-
-The complete text of the GNU General Public License version 2.0 is
-available in the GNU General Public License, which is distributed with
-this project where applicable, and from the Free Software Foundation.
-
-The `openvas/` directory contains vendored OpenVAS scanner source code
-and related third-party components. Those files retain their original
-copyright notices, SPDX license identifiers, license files, and other
-applicable licensing terms.
-
-In particular, see:
-
-- `openvas/COPYING`
-- `openvas/rust/COPYING`
-- `openvas/license-details.md`
-
-Individual files or components within `openvas/` may be subject to
-different or additional licensing terms. Those file-level terms remain
-applicable and are not overridden by this project-level notice.
-
-For third-party components distributed within the vendored OpenVAS
-source tree, consult the applicable license and notice files located
-with those components.
+<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML 2.0//EN">
+<html><head>
+<title>302 Found</title>
+</head><body>
+<h1>Found</h1>
+<p>The document has moved <a href="https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt">here</a>.</p>
+</body></html>
