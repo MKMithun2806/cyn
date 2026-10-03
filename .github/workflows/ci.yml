@@ -32,7 +32,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: openvas/rust/crates/nasl-c-lib/build-cache
-          key: archives-native-${{ hashFiles('openvas/.docker/prod.Dockerfile', 'openvas/rust/crates/nasl-c-lib/Makefile', 'openvas/.docker/vendor/**') }}
+          key: archives-native-linux-amd64-${{ hashFiles('openvas/.docker/prod.Dockerfile', 'openvas/rust/crates/nasl-c-lib/Makefile', 'openvas/.docker/vendor/**', '.github/workflows/ci.yml', '.github/workflows/release.yml') }}
       - name: Build static archives
         if: steps.cache-archives.outputs.cache-hit != 'true'
         run: make -C openvas/rust/crates/nasl-c-lib
@@ -76,7 +76,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: openvas/rust/crates/nasl-c-lib/build-cache
-          key: archives-native-${{ hashFiles('openvas/.docker/prod.Dockerfile', 'openvas/rust/crates/nasl-c-lib/Makefile', 'openvas/.docker/vendor/**') }}
+          key: archives-native-linux-amd64-${{ hashFiles('openvas/.docker/prod.Dockerfile', 'openvas/rust/crates/nasl-c-lib/Makefile', 'openvas/.docker/vendor/**', '.github/workflows/ci.yml', '.github/workflows/release.yml') }}
       - name: Build static archives
         if: steps.cache-archives.outputs.cache-hit != 'true'
         run: make -C openvas/rust/crates/nasl-c-lib

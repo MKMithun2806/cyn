@@ -54,16 +54,25 @@ jobs:
             os: ubuntu-latest
             use-cross: false
             archives: native
+            platform: linux/amd64
+            cache-platform: linux-amd64
+            qemu: false
             archive: tar.gz
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-            use-cross: false
-            archives: native
+            use-cross: true
+            archives: musl
+            platform: linux/amd64
+            cache-platform: linux-amd64
+            qemu: false
             archive: tar.gz
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             use-cross: true
-            archives: arm64
+            archives: musl
+            platform: linux/arm64
+            cache-platform: linux-arm64
+            qemu: true
             archive: tar.gz
 
     steps:
@@ -76,10 +85,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: openvas/rust/crates/nasl-c-lib/build-cache
-          key: archives-${{ matrix.archives }}-${{ hashFiles('openvas/.docker/prod.Dockerfile', 'openvas/rust/crates/nasl-c-lib/Makefile', 'openvas/.docker/vendor/**') }}
+          key: archives-${{ matrix.archives }}-${{ matrix.cache-platform }}-${{ hashFiles('openvas/.docker/prod.Dockerfile', 'openvas/rust/crates/nasl-c-lib/Makefile', 'openvas/.docker/vendor/**', '.github/workflows/ci.yml', '.github/workflows/release.yml') }}
 
       - name: Set up QEMU (arm64 archive build)
-        if: matrix.archives == 'arm64' && steps.cache-archives.outputs.cache-hit != 'true'
+        if: matrix.qemu && steps.cache-archives.outputs.cache-hit != 'true'
         uses: docker/setup-qemu-action@v3
         with:
           platforms: arm64
@@ -89,22 +98,75 @@ jobs:
         run: |
           set -eu
           ARCHIVES_DIR=openvas/rust/crates/nasl-c-lib/build-cache/archives
-          if [ "${{ matrix.archives }}" = "native" ]; then
+          rm -rf "$ARCHIVES_DIR"
+          mkdir -p "$ARCHIVES_DIR"
+          case "${{ matrix.archives }}" in
+          native)
             make -C openvas/rust/crates/nasl-c-lib
-          else
+            ;;
+          musl)
+            cat > /tmp/musl-archives.Dockerfile <<'DOCKERFILE_EOF'
+          FROM alpine:3.20
+          RUN apk add --no-cache build-base bison flex perl linux-headers
+          COPY vendor/krb5-1.22.2 /tmp/krb5-1.22.2
+          COPY vendor/libpcap-1.10.6 /tmp/libpcap-1.10.6
+          WORKDIR /tmp/krb5-1.22.2/src
+          RUN ./configure --prefix=/opt/krb5-static --enable-static --disable-shared \
+                --without-system-verto --without-libedit --disable-rpath \
+            && make -C util/support -j"$(nproc 2>/dev/null || echo 2)" \
+            && make -C util/et -j"$(nproc 2>/dev/null || echo 2)" \
+            && make -C util/profile -j"$(nproc 2>/dev/null || echo 2)" \
+            && make -C include -j"$(nproc 2>/dev/null || echo 2)" \
+            && make -C lib/crypto -j"$(nproc 2>/dev/null || echo 2)" \
+            && make -C lib/krb5 -j"$(nproc 2>/dev/null || echo 2)" \
+            && make -C lib/gssapi -j"$(nproc 2>/dev/null || echo 2)" \
+            && make install-mkdirs \
+            && make -C util/support install \
+            && make -C util/et install \
+            && make -C util/profile install \
+            && make -C include install \
+            && make -C lib/crypto install \
+            && make -C lib/krb5 install \
+            && make -C lib/gssapi install \
+            && test -f /opt/krb5-static/lib/libgssapi_krb5.a \
+            && test -f /opt/krb5-static/lib/libkrb5.a \
+            && test -f /opt/krb5-static/lib/libk5crypto.a \
+            && test -f /opt/krb5-static/lib/libcom_err.a \
+            && test -f /opt/krb5-static/lib/libkrb5support.a
+          WORKDIR /tmp/libpcap-1.10.6
+          RUN ./configure --prefix=/opt/libpcap-static --disable-shared --disable-dbus \
+            && make -j"$(nproc 2>/dev/null || echo 2)" \
+            && make install \
+            && test -f /opt/libpcap-static/lib/libpcap.a
+          RUN mkdir -p /archives/include \
+            && cp /opt/libpcap-static/lib/libpcap.a /archives/ \
+            && cp /opt/krb5-static/lib/libgssapi_krb5.a \
+                  /opt/krb5-static/lib/libkrb5.a \
+                  /opt/krb5-static/lib/libk5crypto.a \
+                  /opt/krb5-static/lib/libcom_err.a \
+                  /opt/krb5-static/lib/libkrb5support.a \
+                  /archives/ \
+            && cp -r /opt/libpcap-static/include/* /archives/include/ \
+            && cp -r /opt/krb5-static/include/* /archives/include/ \
+            && test -f /archives/include/krb5.h \
+            && test -f /archives/include/gssapi/gssapi.h \
+            && test -f /archives/include/pcap.h
+          DOCKERFILE_EOF
             docker build \
-              --platform linux/arm64 \
-              -f openvas/.docker/prod.Dockerfile \
-              --target build-archives \
-              -t cyn-build-archives:arm64 \
-              openvas/
-            cid=$(docker create cyn-build-archives:arm64)
-            rm -rf "$ARCHIVES_DIR"
-            mkdir -p "$ARCHIVES_DIR"
+              --platform ${{ matrix.platform }} \
+              -f /tmp/musl-archives.Dockerfile \
+              -t cyn-musl-archives \
+              openvas/.docker
+            cid=$(docker create cyn-musl-archives)
             docker cp "$cid:/archives/." "$ARCHIVES_DIR/"
             docker rm "$cid"
-            docker rmi -f cyn-build-archives:arm64
-          fi
+            docker rmi -f cyn-musl-archives
+            ;;
+          *)
+            echo "unknown archives flavor: ${{ matrix.archives }}" >&2
+            exit 1
+            ;;
+          esac
           echo "Archives ready:"
           ls -la "$ARCHIVES_DIR"
 
@@ -112,7 +174,7 @@ jobs:
         if: matrix.use-cross
         run: |
           set -eu
-          IMAGE=ghcr.io/cross-rs/aarch64-unknown-linux-musl:main
+          IMAGE=ghcr.io/cross-rs/${{ matrix.target }}:main
           mkdir -p /tmp/capnp-patch
           printf 'FROM %s\nRUN apt-get update && apt-get install -y --no-install-recommends capnproto && rm -rf /var/lib/apt/lists/*\n' "$IMAGE" > /tmp/capnp-patch/Dockerfile
           docker build -t "$IMAGE" /tmp/capnp-patch
@@ -133,7 +195,7 @@ jobs:
             ${{ runner.os }}-${{ matrix.target }}-cargo-
 
       - name: Install cross-compilation tools
-        if: matrix.use-cross && matrix.target == 'aarch64-unknown-linux-musl'
+        if: matrix.use-cross
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -175,7 +237,7 @@ jobs:
             echo "WARNING: crt-static not disabled"
           fi
 
-      - name: Build with cross (Linux arm64 musl)
+      - name: Build with cross
         if: matrix.use-cross
         run: cross build --release --target ${{ matrix.target }}
 
@@ -197,11 +259,12 @@ jobs:
 
           if [ "${{ matrix.archive }}" = "tar.gz" ]; then
             tar czf "${ARCHIVE_NAME}.tar.gz" -C "$(dirname $BINARY)" "$(basename $BINARY)"
-            echo "ASSET=${ARCHIVE_NAME}.tar.gz" >> "$GITHUB_ENV"
+            ASSET="${ARCHIVE_NAME}.tar.gz"
           else
             zip "${ARCHIVE_NAME}.zip" "$BINARY"
-            echo "ASSET=${ARCHIVE_NAME}.zip" >> "$GITHUB_ENV"
+            ASSET="${ARCHIVE_NAME}.zip"
           fi
+          echo "ASSET=$ASSET" >> "$GITHUB_ENV"
 
           if command -v sha256sum &> /dev/null; then
             sha256sum "$ASSET" > "${ASSET}.sha256"
