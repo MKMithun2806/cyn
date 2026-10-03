@@ -109,18 +109,17 @@ writes a JSON or CSV report alongside.
 While stderr is a TTY, a single status line is redrawn every 250 ms:
 
 ```
-⠴ Scanning      [████████░░░░░░░░░░]  42.3%  1,240/3,812  ·   42.7 exec/s  · ETA  1m 04s  · RSS   412 MB  · Elapsed  0m 29s  · I/O    88 MB  · — findings
+Executions  1240 / 3812   Rate    42.7 exec/s   RSS   412 MB   Elapsed   0m 29s   I/O    88 MB   Findings    7
 ```
 
 | Column | Meaning |
 |--------|---------|
-| `Progress` | animated activity marker, progress bar, percentage, and completed / scheduled executions |
+| `Executions` | completed VT executions / scheduled total |
 | `Rate` | executions per second |
-| `ETA` | estimated time remaining |
 | `RSS` | resident memory of the scanner process |
 | `Elapsed` | wall-clock time since execution started |
 | `I/O` | bytes read from disk since execution started (Linux) |
-| `Findings` | final converted finding count (shown on completion) |
+| `Findings` | findings collected so far |
 
 Non-TTY runs print only the final line. Feed-load, selection and plan
 summaries are always printed to stderr:

@@ -173,7 +173,7 @@ While the scan runs, stderr shows a live status line (redrawn every
 250 ms when attached to a terminal):
 
 ```
-⠴ Scanning      [████████░░░░░░░░░░]  42.3%  1,240/3,812  ·   42.7 exec/s  · ETA  1m 04s  · RSS   412 MB  · Elapsed  0m 29s  · I/O    88 MB  · — findings
+Executions  1240 / 3812   Rate    42.7 exec/s   RSS   412 MB   Elapsed   0m 29s   I/O    88 MB   Findings    7
 ```
 
 `--verbose` additionally prints an execution profile after the scan

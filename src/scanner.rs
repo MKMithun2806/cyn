@@ -306,7 +306,6 @@ struct ScanProgress {
     last_draw: Instant,
     io_start: Option<u64>,
     interactive: bool,
-    frame: usize,
 }
 
 impl ScanProgress {
@@ -325,7 +324,6 @@ impl ScanProgress {
             last_draw: now.checked_sub(Duration::from_secs(1)).unwrap_or(now),
             io_start: process_read_bytes(),
             interactive,
-            frame: 0,
         }
     }
 
@@ -335,62 +333,33 @@ impl ScanProgress {
             return;
         }
         self.last_draw = Instant::now();
-        self.frame = self.frame.wrapping_add(1);
-        self.draw(None, false);
+        self.draw(None);
     }
 
     fn finish(&mut self, findings: usize) {
-        self.draw(Some(findings), true);
+        self.draw(Some(findings));
         if self.interactive {
             eprintln!();
         }
     }
 
-    fn draw(&self, findings: Option<usize>, finished: bool) {
+    fn draw(&self, findings: Option<usize>) {
         let elapsed = self.started.elapsed();
         let rate = self.completed as f64 / elapsed.as_secs_f64().max(0.001);
-        let progress = if self.total == 0 {
-            1.0
-        } else {
-            (self.completed as f64 / self.total as f64).min(1.0)
-        };
-        let percent = progress * 100.0;
-        let bar_width = 18usize;
-        let filled = (progress * bar_width as f64).round() as usize;
-        let bar = format!(
-            "{}{}",
-            "█".repeat(filled),
-            "░".repeat(bar_width.saturating_sub(filled))
-        );
-        let eta = if finished || rate <= 0.0 {
-            "—".to_string()
-        } else {
-            let remaining = self.total.saturating_sub(self.completed);
-            format_duration(Duration::from_secs_f64(remaining as f64 / rate))
-        };
         let io_value = match (self.io_start, process_read_bytes()) {
             (Some(start), Some(current)) => format_mb(current.saturating_sub(start)),
             _ => "n/a".into(),
         };
         let mem = process_memory();
         let rss_value = format_mb(mem.rss_bytes);
-        let findings = findings.map(format_count).unwrap_or_else(|| "—".into());
-        let indicator = if finished {
-            "✓"
-        } else {
-            ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"][self.frame % 10]
-        };
-        let label = if finished {
-            "Scan complete"
-        } else {
-            "Scanning"
-        };
+        let findings = findings
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "—".into());
         let line = format!(
-            "{indicator} {label:<13} [{bar}] {percent:>5.1}%  {}/{}  · {:>6.1} exec/s  · ETA {:>8}  · RSS {:>7}  · Elapsed {:>8}  · I/O {:>8}  · {} findings",
-            format_count(self.completed),
-            format_count(self.total),
+            "Executions {:>5} / {:<5}   Rate {:>7.1} exec/s   RSS {:>7}   Elapsed {:>8}   I/O {:>8}   Findings {:>4}",
+            self.completed,
+            self.total,
             rate,
-            eta,
             rss_value,
             format_duration(elapsed),
             io_value,
@@ -404,26 +373,6 @@ impl ScanProgress {
             eprintln!("{line}");
         }
     }
-}
-
-fn format_count(value: usize) -> String {
-    let digits = value.to_string();
-    let first_group = digits.len() % 3;
-    if digits.len() <= 3 {
-        return digits;
-    }
-
-    let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
-    if first_group > 0 {
-        formatted.push_str(&digits[..first_group]);
-    }
-    for (index, chunk) in digits.as_bytes()[first_group..].chunks(3).enumerate() {
-        if first_group > 0 || index > 0 {
-            formatted.push(',');
-        }
-        formatted.push_str(std::str::from_utf8(chunk).expect("count digits are ASCII"));
-    }
-    formatted
 }
 
 fn format_duration(duration: Duration) -> String {
