@@ -8,6 +8,12 @@ earlier history is in the [git log](https://github.com/MKMithun2806/cyn/commits/
 
 ### Added
 
+- **Quick installer** — `install.py`, runnable via
+  `curl -fsSL .../install.py | python3`, detects OS/arch/libc (musl vs
+  glibc), downloads the matching latest release, verifies its sha256,
+  smoke-tests it, installs to `~/.local/bin` and updates PATH;
+  unsupported platforms get an explicit message with the supported
+  targets and a source-build pointer.
 - **Automatic service discovery** — Cyn now runs `nmap` itself when no
   `--nmap` file is given (`-sT -sV --version-light`, all ports unless
   `--ports` is set), with a best-effort UDP pass merged in

@@ -9,6 +9,36 @@ engine. Cyn removes the entire GVM management stack (Redis, gvmd,
 PostgreSQL, GSA, gsad) and exposes the scanner as a single Rust binary:
 no daemons, no database, no raw sockets, no sudo.
 
+## Install
+
+One line — no root, no package manager:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/MKMithun2806/cyn/main/install.py | python3
+```
+
+The installer ([install.py](install.py)) detects your OS, architecture
+and C library (musl vs glibc), picks the matching binary from the
+**latest release**, verifies its sha256 checksum, installs it to
+`~/.local/bin` and puts it on your PATH (editing your shell rc only if
+needed). If your platform has no published build it says so explicitly,
+lists the supported targets, and points you at the source build.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/MKMithun2806/cyn/main/install.py | python3 - --help
+```
+
+| Flag | Description |
+|------|-------------|
+| `--version <X.Y.Z>` | Install a specific release instead of the latest |
+| `--install-dir <DIR>` | Install location (default `~/.local/bin`, env `CYN_INSTALL_DIR`) |
+| `--no-modify-path` | Never edit shell rc files; print the `export PATH` line instead |
+
+Alternatives: [pre-built release archives](docs/INSTALL.md#pre-built-binaries) ·
+[build from source](docs/INSTALL.md#build-from-source)
+
+## Quick start
+
 ```sh
 cyn feed update                    # download the NVT feed (~95K scripts)
 cyn scan 192.168.1.15              # discover, fingerprint, and scan a host
