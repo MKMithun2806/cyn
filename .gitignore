@@ -9,3 +9,14 @@ ROADMAP.md
 __pycache__/
 *.pyc
 AGENTS.md
+
+# Local configs & secrets
+.env
+.env.*
+config.local.json
+credentials/
+secrets/
+
+# IDEs
+.vscode/
+.idea/
