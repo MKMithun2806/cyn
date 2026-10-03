@@ -6,3 +6,5 @@
 .DS_Store
 /work
 ROADMAP.md
+__pycache__/
+*.pyc
