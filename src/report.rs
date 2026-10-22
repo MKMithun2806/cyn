@@ -45,7 +45,13 @@ pub fn generate_csv(findings: &[Finding]) -> String {
             f.confidence.score.to_string(),
             f.confidence.level.as_str().to_string(),
         ];
-        rows.push(fields.iter().map(|field| csv_field(field)).collect::<Vec<_>>().join(","));
+        rows.push(
+            fields
+                .iter()
+                .map(|field| csv_field(field))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
     }
 
     rows.join("\n") + "\n"

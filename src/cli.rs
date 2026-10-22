@@ -103,7 +103,6 @@ pub enum FeedCommand {
         /// Feed release version (e.g., "24.10")
         #[arg(long)]
         feed_version: Option<String>,
-
     },
 }
 

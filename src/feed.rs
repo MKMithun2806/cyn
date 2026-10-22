@@ -134,7 +134,9 @@ pub fn update(
             let _ = fs::rename(&backup, feed_path);
         }
         let _ = fs::remove_dir_all(&staging);
-        return Err(CynError::FeedUpdate(format!("cannot activate feed: {error}")));
+        return Err(CynError::FeedUpdate(format!(
+            "cannot activate feed: {error}"
+        )));
     }
     let _ = fs::remove_dir_all(&backup);
     println!("Feed sync complete.");

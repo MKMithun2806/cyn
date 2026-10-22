@@ -67,10 +67,7 @@ async fn run(cli: Cli) -> Result<(), error::CynError> {
                 output::print_feed_status(&info);
                 Ok(())
             }
-            FeedCommand::Update {
-                url,
-                feed_version,
-            } => {
+            FeedCommand::Update { url, feed_version } => {
                 feed::update(&config, url.as_deref(), feed_version.as_deref())?;
                 let info = feed::status(&config)?;
                 output::print_feed_status(&info);

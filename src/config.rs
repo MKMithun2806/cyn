@@ -18,9 +18,7 @@ impl Config {
         feed_override: Option<PathBuf>,
         config_path: Option<PathBuf>,
     ) -> Result<Self, CynError> {
-        let configured = config_path
-            .map(|path| load_file(&path))
-            .transpose()?;
+        let configured = config_path.map(|path| load_file(&path)).transpose()?;
         let feed_path = feed_override
             .or_else(|| configured.and_then(|config| config.feed_path))
             .unwrap_or_else(default_feed_path);
@@ -40,12 +38,10 @@ struct FileConfig {
 }
 
 fn load_file(path: &Path) -> Result<FileConfig, CynError> {
-    let content = std::fs::read_to_string(path).map_err(|error| CynError::Config(format!(
-        "cannot read {}: {error}", path.display()
-    )))?;
-    toml::from_str(&content).map_err(|error| CynError::Config(format!(
-        "cannot parse {}: {error}", path.display()
-    )))
+    let content = std::fs::read_to_string(path)
+        .map_err(|error| CynError::Config(format!("cannot read {}: {error}", path.display())))?;
+    toml::from_str(&content)
+        .map_err(|error| CynError::Config(format!("cannot parse {}: {error}", path.display())))
 }
 
 /// Compute the default feed path.
