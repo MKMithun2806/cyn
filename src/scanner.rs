@@ -907,7 +907,7 @@ fn build_scan_model(request: &ScanRequest, vts: Vec<models::VT>) -> Result<model
         return Err(CynError::InvalidTarget(request.target.clone()));
     }
 
-    let ports = parse_ports(&request.port_range);
+    let ports = parse_ports(&request.port_range)?;
 
     let excluded = request
         .exclude_hosts
@@ -973,17 +973,30 @@ pub(crate) fn expand_targets(target: &str) -> Result<Vec<String>, CynError> {
                 .map_err(|_| CynError::InvalidTarget(part.to_string()))?;
             match ip {
                 IpAddr::V4(ipv4) => {
+                    if prefix > 32 {
+                        return Err(CynError::InvalidTarget(part.to_string()));
+                    }
                     let ip_num = u32::from_be_bytes(ipv4.octets());
-                    let mask = !0u32 << (32 - prefix);
+                    let mask = if prefix == 0 { 0 } else { !0u32 << (32 - prefix) };
                     let network = ip_num & mask;
                     let broadcast = network | !mask;
-                    for addr in (network + 1)..broadcast {
+                    let (start, end) = if prefix >= 31 {
+                        (network, broadcast)
+                    } else {
+                        (network + 1, broadcast - 1)
+                    };
+                    if u64::from(end) - u64::from(start) + 1 > 1_000_000 {
+                        return Err(CynError::InvalidTarget(format!(
+                            "target range is too large: {part}"
+                        )));
+                    }
+                    for addr in start..=end {
                         hosts.push(IpAddr::from(addr.to_be_bytes()).to_string());
                     }
                 }
-                IpAddr::V6(_) => {
-                    hosts.push(part.to_string());
-                }
+                IpAddr::V6(_) => return Err(CynError::InvalidTarget(
+                    format!("IPv6 CIDR expansion is not supported: {part}"),
+                )),
             }
         } else {
             hosts.push(part.to_string());
@@ -992,51 +1005,57 @@ pub(crate) fn expand_targets(target: &str) -> Result<Vec<String>, CynError> {
     Ok(hosts)
 }
 
-fn parse_ports(port_range: &Option<String>) -> Vec<models::Port> {
+fn parse_ports(port_range: &Option<String>) -> Result<Vec<models::Port>, CynError> {
     let range = match port_range {
         Some(r) => r,
         None => {
             // Default: all TCP ports
-            return vec![models::Port {
+            return Ok(vec![models::Port {
                 protocol: Some(models::Protocol::TCP),
                 range: vec![models::PortRange {
                     start: 1,
                     end: Some(65535),
                 }],
-            }];
+            }]);
         }
     };
 
-    let ranges: Vec<models::PortRange> = range
-        .split(',')
-        .filter_map(|part| {
+    let mut ranges = Vec::new();
+    for part in range.split(',') {
             let part = part.trim();
+            if part.is_empty() {
+                return Err(CynError::Scanner("port list contains an empty item".into()));
+            }
             if part.contains('-') {
                 let parts: Vec<&str> = part.splitn(2, '-').collect();
-                let start: usize = parts[0].parse().ok()?;
-                let end: usize = parts.get(1).and_then(|e| e.parse().ok())?;
-                Some(models::PortRange {
-                    start,
-                    end: Some(end),
-                })
+                let start: usize = parts[0].parse().map_err(|_| {
+                    CynError::Scanner(format!("invalid port range: {part}"))
+                })?;
+                let end: usize = parts[1].parse().map_err(|_| {
+                    CynError::Scanner(format!("invalid port range: {part}"))
+                })?;
+                if !(1..=65535).contains(&start)
+                    || !(1..=65535).contains(&end)
+                    || start > end
+                {
+                    return Err(CynError::Scanner(format!("invalid port range: {part}")));
+                }
+                ranges.push(models::PortRange { start, end: Some(end) });
             } else {
-                let port: usize = part.parse().ok()?;
-                Some(models::PortRange {
-                    start: port,
-                    end: None,
-                })
+                let port: usize = part.parse().map_err(|_| {
+                    CynError::Scanner(format!("invalid port: {part}"))
+                })?;
+                if !(1..=65535).contains(&port) {
+                    return Err(CynError::Scanner(format!("invalid port: {part}")));
+                }
+                ranges.push(models::PortRange { start: port, end: None });
             }
-        })
-        .collect();
+    }
 
-    if ranges.is_empty() {
-        vec![]
-    } else {
-        vec![models::Port {
+    Ok(vec![models::Port {
             protocol: Some(models::Protocol::TCP),
             range: ranges,
-        }]
-    }
+        }])
 }
 
 #[cfg(test)]
@@ -1100,6 +1119,15 @@ mod tests {
     }
 
     #[test]
+    fn expand_single_host_cidr() {
+        assert_eq!(expand_targets("192.168.1.7/32").unwrap(), vec!["192.168.1.7"]);
+        assert_eq!(
+            expand_targets("192.168.1.6/31").unwrap(),
+            vec!["192.168.1.6", "192.168.1.7"]
+        );
+    }
+
+    #[test]
     fn expand_mixed() {
         let hosts = expand_targets("10.0.0.1, 192.168.1.0/30").unwrap();
         assert_eq!(hosts, vec!["10.0.0.1", "192.168.1.1", "192.168.1.2"]);
@@ -1107,12 +1135,19 @@ mod tests {
 
     #[test]
     fn parse_port_range() {
-        let ports = parse_ports(&Some("22,80-443".into()));
+        let ports = parse_ports(&Some("22,80-443".into())).unwrap();
         assert_eq!(ports.len(), 1);
         assert_eq!(ports[0].range.len(), 2);
         assert_eq!(ports[0].range[0].start, 22);
         assert_eq!(ports[0].range[1].start, 80);
         assert_eq!(ports[0].range[1].end, Some(443));
+    }
+
+    #[test]
+    fn rejects_invalid_ports() {
+        assert!(parse_ports(&Some("80,garbage".into())).is_err());
+        assert!(parse_ports(&Some("100-20".into())).is_err());
+        assert!(parse_ports(&Some("65536".into())).is_err());
     }
 
     #[test]
