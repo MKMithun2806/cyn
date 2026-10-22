@@ -14,11 +14,16 @@ pub struct Config {
 
 impl Config {
     /// Build configuration from explicit values, falling back to defaults.
-    pub fn resolve(feed_override: Option<PathBuf>) -> Result<Self, CynError> {
-        let feed_path = match feed_override {
-            Some(p) => p,
-            None => default_feed_path(),
-        };
+    pub fn resolve(
+        feed_override: Option<PathBuf>,
+        config_path: Option<PathBuf>,
+    ) -> Result<Self, CynError> {
+        let configured = config_path
+            .map(|path| load_file(&path))
+            .transpose()?;
+        let feed_path = feed_override
+            .or_else(|| configured.and_then(|config| config.feed_path))
+            .unwrap_or_else(default_feed_path);
         Ok(Self { feed_path })
     }
 
@@ -27,6 +32,20 @@ impl Config {
     pub fn plugins_folder(&self) -> &Path {
         &self.feed_path
     }
+}
+
+#[derive(serde::Deserialize)]
+struct FileConfig {
+    feed_path: Option<PathBuf>,
+}
+
+fn load_file(path: &Path) -> Result<FileConfig, CynError> {
+    let content = std::fs::read_to_string(path).map_err(|error| CynError::Config(format!(
+        "cannot read {}: {error}", path.display()
+    )))?;
+    toml::from_str(&content).map_err(|error| CynError::Config(format!(
+        "cannot parse {}: {error}", path.display()
+    )))
 }
 
 /// Compute the default feed path.
@@ -51,7 +70,7 @@ mod tests {
 
     #[test]
     fn config_with_explicit_feed() {
-        let cfg = Config::resolve(Some(PathBuf::from("/tmp/feed"))).unwrap();
+        let cfg = Config::resolve(Some(PathBuf::from("/tmp/feed")), None).unwrap();
         assert_eq!(cfg.feed_path, PathBuf::from("/tmp/feed"));
     }
 }

@@ -58,7 +58,7 @@ async fn main() {
 
 async fn run(cli: Cli) -> Result<(), error::CynError> {
     let profile_execution = cli.verbose;
-    let config = config::Config::resolve(cli.feed)?;
+    let config = config::Config::resolve(cli.feed, cli.config)?;
 
     match cli.command {
         Command::Feed { action } => match action {

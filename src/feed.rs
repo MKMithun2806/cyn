@@ -187,7 +187,7 @@ mod tests {
 
     #[test]
     fn feed_status_nonexistent() {
-        let config = Config::resolve(Some(PathBuf::from("/nonexistent/feed"))).unwrap();
+        let config = Config::resolve(Some(PathBuf::from("/nonexistent/feed")), None).unwrap();
         let info = status(&config).unwrap();
         assert!(!info.exists);
     }
@@ -211,7 +211,7 @@ FEED_VENDOR = "Greenbone AG";
         fs::create_dir(&sub).unwrap();
         fs::write(sub.join("nested.nasl"), "exit(0);").unwrap();
 
-        let config = Config::resolve(Some(feed.to_path_buf())).unwrap();
+        let config = Config::resolve(Some(feed.to_path_buf()), None).unwrap();
         let info = status(&config).unwrap();
 
         assert!(info.exists);
