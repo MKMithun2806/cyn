@@ -51,7 +51,6 @@ pub fn update(
     config: &Config,
     upstream_url: Option<&str>,
     feed_version: Option<&str>,
-    _signature_check: bool,
 ) -> Result<(), CynError> {
     let base_url = upstream_url.unwrap_or(DEFAULT_FEED_URL);
     let version = feed_version.unwrap_or(DEFAULT_FEED_VERSION);

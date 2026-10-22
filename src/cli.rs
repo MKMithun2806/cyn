@@ -104,9 +104,6 @@ pub enum FeedCommand {
         #[arg(long)]
         feed_version: Option<String>,
 
-        /// Verify feed signatures
-        #[arg(long)]
-        signature_check: bool,
     },
 }
 
