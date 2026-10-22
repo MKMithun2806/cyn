@@ -75,7 +75,7 @@ pub fn update(
     println!("  -> {}", feed_path.display());
     println!();
 
-    let output = Command::new("rsync")
+    let status = Command::new("rsync")
         .args([
             "--stats",
             "--progress",
@@ -87,7 +87,7 @@ pub fn update(
             &rsync_url,
             &staging.display().to_string(),
         ])
-        .output()
+        .status()
         .map_err(|e| {
             CynError::FeedUpdate(format!(
                 "rsync not found: {e}\n\
@@ -99,20 +99,8 @@ pub fn update(
             ))
         })?;
 
-    // Always show rsync output so the user can see what happened
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    if !stdout.is_empty() {
-        println!("{stdout}");
-    }
-
-    if !output.status.success() {
-        let msg = if !stderr.is_empty() {
-            stderr.trim().to_string()
-        } else {
-            format!("rsync exited with status {}", output.status)
-        };
+    if !status.success() {
+        let msg = format!("rsync exited with status {status}");
 
         // Provide helpful guidance for common errors
         if msg.contains("Unknown module") || msg.contains("does not exist") {
