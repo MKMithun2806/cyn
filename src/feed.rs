@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::Config;
 use crate::error::CynError;
@@ -60,9 +61,14 @@ pub fn update(
     let rsync_url = format!("{base_url}/vulnerability-feed/{version}/vt-data/nasl/");
 
     let feed_path = &config.feed_path;
-    if !feed_path.exists() {
-        fs::create_dir_all(feed_path).map_err(|e| CynError::FeedUpdate(format!("{e}")))?;
-    }
+    let parent = feed_path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(|e| CynError::FeedUpdate(format!("{e}")))?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| CynError::FeedUpdate(format!("clock error: {e}")))?
+        .as_nanos();
+    let staging = parent.join(format!(".cyn-feed-{nonce}.tmp"));
+    fs::create_dir(&staging).map_err(|e| CynError::FeedUpdate(format!("{e}")))?;
 
     println!("Syncing feed from:");
     println!("  {rsync_url}");
@@ -79,7 +85,7 @@ pub fn update(
             "--partial",
             "--compress",
             &rsync_url,
-            &feed_path.display().to_string(),
+            &staging.display().to_string(),
         ])
         .output()
         .map_err(|e| {
@@ -126,9 +132,23 @@ pub fn update(
             )));
         }
 
+        let _ = fs::remove_dir_all(&staging);
         return Err(CynError::FeedUpdate(msg));
     }
 
+    let backup = parent.join(format!(".cyn-feed-{nonce}.old"));
+    if feed_path.exists() {
+        fs::rename(feed_path, &backup)
+            .map_err(|e| CynError::FeedUpdate(format!("cannot stage existing feed: {e}")))?;
+    }
+    if let Err(error) = fs::rename(&staging, feed_path) {
+        if backup.exists() {
+            let _ = fs::rename(&backup, feed_path);
+        }
+        let _ = fs::remove_dir_all(&staging);
+        return Err(CynError::FeedUpdate(format!("cannot activate feed: {error}")));
+    }
+    let _ = fs::remove_dir_all(&backup);
     println!("Feed sync complete.");
     Ok(())
 }
