@@ -956,7 +956,7 @@ fn build_scan_model(request: &ScanRequest, vts: Vec<models::VT>) -> Result<model
     })
 }
 
-fn expand_targets(target: &str) -> Result<Vec<String>, CynError> {
+pub(crate) fn expand_targets(target: &str) -> Result<Vec<String>, CynError> {
     let mut hosts = Vec::new();
     for part in target.split(',') {
         let part = part.trim();

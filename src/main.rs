@@ -126,7 +126,15 @@ async fn run(cli: Cli) -> Result<(), error::CynError> {
             let mut discovery = if let Some(ref nmap_path) = nmap {
                 let scan =
                     nmap::NmapScan::from_file(nmap_path).map_err(error::CynError::Scanner)?;
-                discovery::from_nmap(scan)
+                let mut imported = discovery::from_nmap(scan);
+                let requested_hosts = scanner::expand_targets(&target)?;
+                imported.hosts.retain(|host| {
+                    requested_hosts.iter().any(|requested| {
+                        requested == &host.address
+                            || host.hostname.as_deref() == Some(requested.as_str())
+                    })
+                });
+                imported
             } else {
                 let request = discovery::DiscoveryRequest {
                     target: target.clone(),
