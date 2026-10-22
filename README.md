@@ -106,6 +106,7 @@ Options:
   -v, --verbose             diagnostics + execution profiling (global)
 
       --feed <PATH>         NVT feed directory (env: CYN_FEED_PATH)
+  -c, --config <PATH>       TOML configuration file (currently supports feed_path)
 ```
 
 ### Port discovery
@@ -117,6 +118,10 @@ slow. Narrow it one of these ways:
 |--------|---------|-------------|
 | `--ports` | `--ports 22,80,443` | Constrain the built-in discovery pass |
 | `--nmap` | `--nmap scan.xml` | Import from an nmap XML file (skips running nmap) |
+
+Imported Nmap data is restricted to the host or hosts named by the scan target.
+IPv4 `/31` and `/32` targets are supported; oversized ranges and invalid port
+values are rejected.
 
 **Nmap workflow:**
 

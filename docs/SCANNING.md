@@ -149,7 +149,7 @@ Options:
   -o, --output <FORMAT>   terminal | json                    [default: terminal]
       --max-hosts <N>     Concurrent hosts                   [default: 4]
       --max-checks <N>    Checks per host                    [default: 4]
-      --vt <OID,OID,...>  Specific VTs to run (bypasses selection)
+      --vt <OID,OID,...>  Specific VTs to run (bypasses automatic selection)
       --ports <RANGE>     Discovery port filter, e.g. "22,80-443"
   -n, --nmap <FILE>       Import ports/services from nmap XML (skips running nmap)
       --exclude <HOSTS>   Comma-separated hosts to skip
