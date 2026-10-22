@@ -9,62 +9,50 @@ pub fn generate_json(findings: &[Finding]) -> String {
 }
 
 pub fn generate_csv(findings: &[Finding]) -> String {
-    let mut w = Vec::new();
-    writeln!(
-        w,
-        "host,port,protocol,oid,name,severity,cves,solution,references,result_type,category,service,product,version,evidence,detection_reason,source,confidence_score,confidence_level"
-    )
-    .unwrap();
+    let mut rows = vec![
+        "host,port,protocol,oid,name,severity,cves,solution,references,result_type,category,service,product,version,evidence,detection_reason,source,confidence_score,confidence_level".to_string(),
+    ];
 
     for f in findings {
-        let port = f.port.map(|p| p.to_string()).unwrap_or_default();
-        let protocol = f.protocol.clone().unwrap_or_default();
-        let severity = f.severity.map(|s| s.to_string()).unwrap_or_default();
-        let cves = f.cves.join(";");
-        let solution = f.solution.as_deref().unwrap_or("").replace('"', "\"\"");
-        let references = f.references.join(";");
-        let name = f.name.replace('"', "\"\"");
-        let oid = f.oid.replace('"', "\"\"");
-        let service = f.service.as_deref().unwrap_or("");
-        let product = f.product.as_deref().unwrap_or("");
-        let version = f.version.as_deref().unwrap_or("");
         let evidence = f
             .evidence
             .iter()
             .map(|item| format!("{}:{}", item.kind, item.value))
             .collect::<Vec<_>>()
-            .join(";")
-            .replace('"', "\"\"");
-        let detection_reason = f.detection_reason.as_deref().unwrap_or("");
-        let source = f.source.as_deref().unwrap_or("");
-
-        writeln!(
-            w,
-            "\"{}\",{},{},\"{}\",\"{}\",{},\"{}\",\"{}\",\"{}\",{},\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",{},\"{}\"",
-            f.host,
-            port,
-            protocol,
-            oid,
-            name,
-            severity,
-            cves,
-            solution,
-            references,
-            f.result_type,
-            serde_json::to_string(&f.category).unwrap_or_else(|_| "\"information\"".into()).trim_matches('"'),
-            service,
-            product,
-            version,
+            .join(";");
+        let category = serde_json::to_string(&f.category)
+            .unwrap_or_else(|_| "\"information\"".into())
+            .trim_matches('"')
+            .to_string();
+        let fields = [
+            f.host.clone(),
+            f.port.map(|p| p.to_string()).unwrap_or_default(),
+            f.protocol.clone().unwrap_or_default(),
+            f.oid.clone(),
+            f.name.clone(),
+            f.severity.map(|s| s.to_string()).unwrap_or_default(),
+            f.cves.join(";"),
+            f.solution.clone().unwrap_or_default(),
+            f.references.join(";"),
+            f.result_type.clone(),
+            category,
+            f.service.clone().unwrap_or_default(),
+            f.product.clone().unwrap_or_default(),
+            f.version.clone().unwrap_or_default(),
             evidence,
-            detection_reason,
-            source,
-            f.confidence.score,
-            f.confidence.level.as_str()
-        )
-        .unwrap();
+            f.detection_reason.clone().unwrap_or_default(),
+            f.source.clone().unwrap_or_default(),
+            f.confidence.score.to_string(),
+            f.confidence.level.as_str().to_string(),
+        ];
+        rows.push(fields.iter().map(|field| csv_field(field)).collect::<Vec<_>>().join(","));
     }
 
-    String::from_utf8(w).unwrap_or_default()
+    rows.join("\n") + "\n"
+}
+
+fn csv_field(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
 }
 
 pub fn write_report(
