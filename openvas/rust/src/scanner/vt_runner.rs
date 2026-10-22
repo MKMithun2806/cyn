@@ -136,13 +136,10 @@ impl<'a> VTRunner<'a> {
 
     // TODO: probably better to enhance ContextKey::Scan to contain target and scan_id?
     fn generate_key(&self) -> KbContext {
-        let original_target_str = self
-            .scan_ctx
-            .target_by_id(self.target)
-            .original_target_str();
+        let target_ip = self.scan_ctx.target_by_id(self.target).ip_addr();
         (
             self.scan_ctx.scan().clone(),
-            crate::storage::Target(original_target_str.into()),
+            crate::storage::Target(target_ip.to_string()),
         )
     }
 
