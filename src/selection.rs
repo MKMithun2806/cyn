@@ -216,10 +216,11 @@ fn is_relevant(data: &models::VTData, context: &SelectionContext) -> bool {
                     })
             };
             port_match
-                && identity
-                    .tokens
-                    .iter()
-                    .any(|token| metadata_tokens.contains(token))
+                && ((!data.required_ports.is_empty() || !data.required_udp_ports.is_empty())
+                    || identity
+                        .tokens
+                        .iter()
+                        .any(|token| metadata_tokens.contains(token)))
         })
         .collect();
     if matched_identities.is_empty() {
@@ -408,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn product_mismatch_is_not_selected() {
+    fn port_specific_checks_survive_unknown_product_names() {
         let (candidate, data) = vt("openssh", "OpenSSH vulnerability", "General", "22/tcp");
         let metadata = HashMap::from([(candidate.oid.clone(), data)]);
         let nginx_context = SelectionContext::from_discovery(&DiscoveryResult {
@@ -429,7 +430,7 @@ mod tests {
             }],
         });
         let (selected, _) = select_vts(&[candidate], &metadata, &nginx_context);
-        assert!(selected.is_empty());
+        assert_eq!(selected.len(), 1);
     }
 
     #[test]
