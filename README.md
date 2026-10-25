@@ -111,8 +111,9 @@ Options:
 
 ### Port discovery
 
-By default Cyn runs nmap against **all 65535 TCP ports** — thorough but
-slow. Narrow it one of these ways:
+By default Cyn runs nmap against **all 65535 TCP ports** for discovery —
+thorough but slow. The vulnerability checks then target the open ports found
+by discovery. Narrow discovery one of these ways:
 
 | Method | Example | Description |
 |--------|---------|-------------|

@@ -51,7 +51,12 @@ impl NmapScan {
 
         loop {
             match reader.read_event_into(&mut buf) {
-                Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                Ok(event @ (Event::Start(_) | Event::Empty(_))) => {
+                    let is_empty = matches!(&event, Event::Empty(_));
+                    let e = match event {
+                        Event::Start(e) | Event::Empty(e) => e,
+                        _ => unreachable!(),
+                    };
                     let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
                     match tag.as_str() {
                         "host" => {
@@ -107,8 +112,13 @@ impl NmapScan {
                             }
                         }
                         "cpe" => {
-                            current_cpe = true;
-                            if let Some(value) = extract_attr(&e, b"name") {
+                            // Self-closing CPE elements have no text or matching End
+                            // event. Do not leave the text-mode state enabled for
+                            // subsequent elements, and ignore empty attributes.
+                            current_cpe = !is_empty;
+                            if let Some(value) =
+                                extract_attr(&e, b"name").filter(|value| !value.trim().is_empty())
+                            {
                                 if let Some(ref mut p) = current_port {
                                     p.cpes.push(value);
                                 }
@@ -253,5 +263,34 @@ mod tests {
         assert_eq!(scan.hosts.len(), 2);
         let ports = scan.open_tcp_ports();
         assert_eq!(ports, vec![22, 80]);
+    }
+
+    #[test]
+    fn self_closing_cpe_does_not_capture_following_text() {
+        let xml = r#"<nmaprun><host><address addr="192.0.2.1"/>
+            <ports><port protocol="tcp" portid="443"><state state="open"/>
+            <service name="https"><cpe name="cpe:/a:example:server:1.0"/></service>
+            </port><port protocol="tcp" portid="8443"><state state="open"/>
+            <service name="https"><cpe>cpe:/a:example:other:2.0</cpe></service>
+            </port></ports></host></nmaprun>"#;
+        let scan = NmapScan::parse(xml).unwrap();
+        assert_eq!(
+            scan.hosts[0].ports[0].cpes,
+            vec!["cpe:/a:example:server:1.0"]
+        );
+        assert_eq!(
+            scan.hosts[0].ports[1].cpes,
+            vec!["cpe:/a:example:other:2.0"]
+        );
+    }
+
+    #[test]
+    fn empty_cpe_values_are_ignored() {
+        let xml = r#"<nmaprun><host><address addr="192.0.2.1"/>
+            <ports><port protocol="tcp" portid="80"><state state="open"/>
+            <service name="http"><cpe name=""/></service>
+            </port></ports></host></nmaprun>"#;
+        let scan = NmapScan::parse(xml).unwrap();
+        assert!(scan.hosts[0].ports[0].cpes.is_empty());
     }
 }

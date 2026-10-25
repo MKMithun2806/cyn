@@ -92,7 +92,7 @@ pub struct ScanRequest {
 pub async fn run_scan(
     config: &Config,
     request: &ScanRequest,
-    _open_ports: &[u16],
+    open_ports: &[u16],
 ) -> Result<Vec<Finding>, CynError> {
     let feed_path = &config.feed_path;
 
@@ -117,7 +117,7 @@ pub async fn run_scan(
     eprintln!("Feed ready.");
 
     eprintln!("Selecting vulnerability checks...");
-    let vts = load_vts(&storage, request, _open_ports).await?;
+    let vts = load_vts(&storage, request, open_ports).await?;
     eprintln!("Selected {} vulnerability checks.", vts.len());
     let selected_count = vts.len();
 
