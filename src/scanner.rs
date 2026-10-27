@@ -17,7 +17,7 @@ use scannerlib::models;
 use scannerlib::nasl::nasl_std_executor;
 use scannerlib::nasl::syntax::Loader;
 use scannerlib::nasl::utils::ctx::{CtxTarget, CtxTargets, ScanCtx, TargetId};
-use scannerlib::scanner::{Scan, ScanRunner};
+use scannerlib::scanner::{Scan, ScanRunner, ScriptResultKind};
 use scannerlib::scheduling::Scheduler;
 use scannerlib::storage::inmemory::InMemoryStorage;
 use scannerlib::storage::items::kb::{self, KbContextKey, KbItem};
@@ -196,6 +196,9 @@ pub async fn run_scan(
     let mut succeeded = 0u32;
     let mut failed = 0u32;
     let mut errors = 0u32;
+    let mut body_attempted = 0u32;
+    let mut skipped: std::collections::BTreeMap<&'static str, u32> =
+        std::collections::BTreeMap::new();
 
     let mut stream = Box::pin(runner.stream());
     let mut total_results = 0usize;
@@ -206,6 +209,29 @@ pub async fn run_scan(
         match result {
             Ok(script_result) => {
                 phase_timings.add(script_result.timing);
+                match &script_result.kind {
+                    ScriptResultKind::MissingRequiredKey(_) => {
+                        *skipped.entry("missing required key").or_default() += 1;
+                    }
+                    ScriptResultKind::MissingMandatoryKey(_) => {
+                        *skipped.entry("missing mandatory key").or_default() += 1;
+                    }
+                    ScriptResultKind::MissingPort(_, _) => {
+                        *skipped.entry("missing required port").or_default() += 1;
+                    }
+                    ScriptResultKind::ContainsExcludedKey(_) => {
+                        *skipped.entry("excluded key").or_default() += 1;
+                    }
+                    ScriptResultKind::InvalidPort(_, _) => {
+                        *skipped.entry("invalid port").or_default() += 1;
+                    }
+                    ScriptResultKind::StorageError(_) => {
+                        *skipped.entry("storage error").or_default() += 1;
+                    }
+                    ScriptResultKind::ReturnCode(_) | ScriptResultKind::Error(_) => {
+                        body_attempted += 1;
+                    }
+                }
                 if script_result.has_succeeded() {
                     succeeded += 1;
                     tracing::debug!(
@@ -232,6 +258,13 @@ pub async fn run_scan(
     tracing::info!(
         "scan execution complete: succeeded={succeeded}, failed={failed}, errors={errors}, total_stream_results={total_results}"
     );
+    eprintln!(
+        "VT execution summary: {total_results} attempted · {body_attempted} NASL bodies entered · {} prerequisite skips · {errors} runner errors",
+        skipped.values().sum::<u32>()
+    );
+    for (reason, count) in skipped {
+        eprintln!("  {reason}: {count}");
+    }
     let results = storage
         .remove(&ScanID(scan_id))
         .await
@@ -549,6 +582,22 @@ async fn seed_discovery_kb(
                 .await?;
             }
 
+            if let Some(server) = service
+                .fingerprint
+                .as_ref()
+                .and_then(|fingerprint| fingerprint.headers.get("server"))
+            {
+                if let Some(key) = server_banner_key(server) {
+                    set_discovery_custom_kb(
+                        scan_ctx,
+                        &context,
+                        &format!("{key}/banner"),
+                        KbItem::Boolean(true),
+                    )
+                    .await?;
+                }
+            }
+
             if let Some(product) = service
                 .product
                 .as_deref()
@@ -670,6 +719,21 @@ fn cpe_base(cpe: &str) -> Option<String> {
     let fields: Vec<&str> = cpe.split(':').collect();
     let count = if cpe.starts_with("cpe:2.3:") { 5 } else { 4 };
     (fields.len() >= count).then(|| fields[..count].join(":"))
+}
+
+fn server_banner_key(server: &str) -> Option<String> {
+    let product = server
+        .trim()
+        .split(|character: char| character == '/' || character.is_whitespace())
+        .next()
+        .filter(|value| {
+            !value.is_empty()
+                && value != &"-"
+                && value.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+                })
+        })?;
+    Some(product.to_string())
 }
 
 async fn build_vt_metadata_map(
@@ -1173,6 +1237,13 @@ mod tests {
             Some("cpe:2.3:a:openbsd:openssh")
         );
         assert!(cpe_base("not-a-cpe").is_none());
+    }
+
+    #[test]
+    fn server_banner_key_matches_openvas_product_key_convention() {
+        assert_eq!(server_banner_key("Boa/0.93.15").as_deref(), Some("Boa"));
+        assert_eq!(server_banner_key("nginx 1.24.0").as_deref(), Some("nginx"));
+        assert!(server_banner_key("-").is_none());
     }
 
     #[test]
