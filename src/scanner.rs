@@ -198,7 +198,7 @@ pub async fn run_scan(
     let mut failed = 0u32;
     let mut errors = 0u32;
     let mut body_attempted = 0u32;
-    let mut skipped: std::collections::BTreeMap<&'static str, u32> =
+    let mut skipped: std::collections::BTreeMap<(String, String, String), u32> =
         std::collections::BTreeMap::new();
 
     let mut stream = Box::pin(runner.stream());
@@ -211,23 +211,59 @@ pub async fn run_scan(
             Ok(script_result) => {
                 phase_timings.add(script_result.timing);
                 match &script_result.kind {
-                    ScriptResultKind::MissingRequiredKey(_) => {
-                        *skipped.entry("missing required key").or_default() += 1;
+                    ScriptResultKind::MissingRequiredKey(key) => {
+                        *skipped
+                            .entry((
+                                "missing required key".into(),
+                                script_result.oid.clone(),
+                                key.clone(),
+                            ))
+                            .or_default() += 1;
                     }
-                    ScriptResultKind::MissingMandatoryKey(_) => {
-                        *skipped.entry("missing mandatory key").or_default() += 1;
+                    ScriptResultKind::MissingMandatoryKey(key) => {
+                        *skipped
+                            .entry((
+                                "missing mandatory key".into(),
+                                script_result.oid.clone(),
+                                key.clone(),
+                            ))
+                            .or_default() += 1;
                     }
-                    ScriptResultKind::MissingPort(_, _) => {
-                        *skipped.entry("missing required port").or_default() += 1;
+                    ScriptResultKind::MissingPort(protocol, port) => {
+                        *skipped
+                            .entry((
+                                "missing required port".into(),
+                                script_result.oid.clone(),
+                                format!("{protocol}/{port}"),
+                            ))
+                            .or_default() += 1;
                     }
-                    ScriptResultKind::ContainsExcludedKey(_) => {
-                        *skipped.entry("excluded key").or_default() += 1;
+                    ScriptResultKind::ContainsExcludedKey(key) => {
+                        *skipped
+                            .entry((
+                                "excluded key".into(),
+                                script_result.oid.clone(),
+                                key.clone(),
+                            ))
+                            .or_default() += 1;
                     }
-                    ScriptResultKind::InvalidPort(_, _) => {
-                        *skipped.entry("invalid port").or_default() += 1;
+                    ScriptResultKind::InvalidPort(protocol, port) => {
+                        *skipped
+                            .entry((
+                                "invalid port".into(),
+                                script_result.oid.clone(),
+                                format!("{protocol}/{port}"),
+                            ))
+                            .or_default() += 1;
                     }
-                    ScriptResultKind::StorageError(_) => {
-                        *skipped.entry("storage error").or_default() += 1;
+                    ScriptResultKind::StorageError(error) => {
+                        *skipped
+                            .entry((
+                                "storage error".into(),
+                                script_result.oid.clone(),
+                                error.to_string(),
+                            ))
+                            .or_default() += 1;
                     }
                     ScriptResultKind::ReturnCode(_) | ScriptResultKind::Error(_) => {
                         body_attempted += 1;
@@ -263,8 +299,8 @@ pub async fn run_scan(
         "VT execution summary: {total_results} attempted · {body_attempted} NASL bodies entered · {} prerequisite skips · {errors} runner errors",
         skipped.values().sum::<u32>()
     );
-    for (reason, count) in skipped {
-        eprintln!("  {reason}: {count}");
+    for ((reason, oid, prerequisite), count) in &skipped {
+        eprintln!("  {reason}: {count} · {oid} · {prerequisite}");
     }
     let results = storage
         .remove(&ScanID(scan_id))
@@ -616,6 +652,15 @@ async fn seed_discovery_kb(
                     KbItem::Boolean(true),
                 )
                 .await?;
+                for detection_key in product_detection_keys(product) {
+                    set_discovery_custom_kb(
+                        scan_ctx,
+                        &context,
+                        detection_key,
+                        KbItem::Boolean(true),
+                    )
+                    .await?;
+                }
                 if let Some(name) = service.service.as_deref().filter(|name| !name.is_empty()) {
                     set_discovery_custom_kb(
                         scan_ctx,
@@ -643,6 +688,24 @@ async fn seed_discovery_kb(
     }
 
     Ok(service_count)
+}
+
+/// Map Nmap's explicit product fingerprint to the canonical detector keys
+/// expected by OpenVAS vulnerability checks. These keys only let dependent
+/// checks run; the checks still perform their own vulnerability probes.
+fn product_detection_keys(product: &str) -> &'static [&'static str] {
+    let product = product.to_ascii_lowercase();
+    if product.contains("samba") || product.contains("smbd") {
+        &["samba/smb/detected"]
+    } else if product.contains("distcc") {
+        &["distcc/detected"]
+    } else if product.contains("unrealircd") {
+        &["UnrealIRCD/Detected"]
+    } else if product.contains("vsftpd") {
+        &["ftp/vsftpd/detected"]
+    } else {
+        &[]
+    }
 }
 
 async fn set_discovery_kb(
