@@ -80,6 +80,7 @@ async fn run(cli: Cli) -> Result<(), error::CynError> {
             max_hosts,
             max_checks,
             vt,
+            max_vts,
             ports,
             nmap,
             exclude,
@@ -167,6 +168,7 @@ async fn run(cli: Cli) -> Result<(), error::CynError> {
                 max_checks,
                 port_range,
                 vt_oids,
+                max_vts,
                 exclude_hosts: exclude.map(|e| {
                     e.split(',')
                         .map(|s| s.trim().to_string())

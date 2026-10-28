@@ -49,6 +49,10 @@ pub enum Command {
         #[arg(long)]
         vt: Option<String>,
 
+        /// Maximum number of selected root VTs; dependencies may be added.
+        #[arg(long)]
+        max_vts: Option<usize>,
+
         /// Port range to scan (e.g., "1-1024" or "22,80,443"). Default: all 65535 ports.
         #[arg(long)]
         ports: Option<String>,

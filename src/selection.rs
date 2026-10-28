@@ -75,6 +75,17 @@ impl SelectionContext {
                 {
                     add_tokens(&mut identity.tokens, value);
                 }
+                if let Some(service_name) = service.service.as_deref() {
+                    if service_name.eq_ignore_ascii_case("http")
+                        || service_name.eq_ignore_ascii_case("https")
+                    {
+                        identity.tokens.extend(
+                            ["http", "https", "web", "www"]
+                                .into_iter()
+                                .map(str::to_string),
+                        );
+                    }
+                }
                 if let Some((product, version)) = normalize_product_version(
                     service.product.as_deref(),
                     service.version.as_deref(),
@@ -200,6 +211,13 @@ fn is_relevant(data: &models::VTData, context: &SelectionContext) -> bool {
         return true;
     }
     let metadata_tokens = tokenize(&format!("{} {} {}", data.name, data.filename, data.family));
+    let required_services: Vec<&str> = data
+        .required_ports
+        .iter()
+        .chain(data.required_udp_ports.iter())
+        .filter_map(|port| port.strip_prefix("Services/"))
+        .map(|service| service.rsplit('/').next().unwrap_or(service))
+        .collect();
     let matched_identities: Vec<&ServiceIdentity> = context
         .identities
         .iter()
@@ -215,7 +233,12 @@ fn is_relevant(data: &models::VTData, context: &SelectionContext) -> bool {
                         port.split('/').next().unwrap_or(port).trim() == identity.port.to_string()
                     })
             };
+            let service_match = required_services.is_empty()
+                || required_services
+                    .iter()
+                    .any(|service| identity.tokens.contains(*service));
             port_match
+                && service_match
                 && ((!data.required_ports.is_empty() || !data.required_udp_ports.is_empty())
                     || identity
                         .tokens
@@ -431,6 +454,17 @@ mod tests {
         });
         let (selected, _) = select_vts(&[candidate], &metadata, &nginx_context);
         assert_eq!(selected.len(), 1);
+    }
+
+    #[test]
+    fn service_specific_checks_require_matching_discovered_service() {
+        let (candidate, data) = vt("ftp-check", "FTP vulnerability", "FTP", "");
+        let mut data = data;
+        data.required_ports = vec!["Services/ftp".into(), "22".into()];
+        let metadata = HashMap::from([(candidate.oid.clone(), data)]);
+        let (selected, stats) = select_vts(&[candidate], &metadata, &context());
+        assert!(selected.is_empty());
+        assert_eq!(stats.skipped_irrelevant, 1);
     }
 
     #[test]

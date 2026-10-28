@@ -84,6 +84,7 @@ pub struct ScanRequest {
     pub max_checks: u32,
     pub port_range: Option<String>,
     pub vt_oids: Option<Vec<String>>,
+    pub max_vts: Option<usize>,
     pub exclude_hosts: Option<Vec<String>>,
     pub discovery: Option<DiscoveryResult>,
     pub profile_execution: bool,
@@ -792,7 +793,16 @@ async fn load_vts(
                         .as_ref()
                         .map(SelectionContext::from_discovery)
                         .unwrap_or_else(|| SelectionContext::from_tcp_ports(open_ports));
-                    let (filtered, stats) = select_vts(&candidates, &metadata, &context);
+                    let (mut filtered, stats) = select_vts(&candidates, &metadata, &context);
+
+                    if let Some(max_vts) = request.max_vts {
+                        if filtered.len() > max_vts {
+                            filtered.truncate(max_vts);
+                            eprintln!(
+                                "VT cap applied: keeping {max_vts} selected root VTs; scheduler dependencies may be added"
+                            );
+                        }
+                    }
 
                     tracing::info!(
                         "filtered {} VTs to {} (kept={}, port_skip={}, family_skip={}, irrelevant_skip={}, dependencies={})",
@@ -1143,6 +1153,7 @@ mod tests {
             max_checks: 4,
             port_range: None,
             vt_oids: None,
+            max_vts: None,
             exclude_hosts: None,
             discovery: None,
             profile_execution: false,
@@ -1160,6 +1171,7 @@ mod tests {
             max_checks: 1,
             port_range: Some("22,80-443".into()),
             vt_oids: None,
+            max_vts: None,
             exclude_hosts: Some(vec!["10.0.0.3".into()]),
             discovery: None,
             profile_execution: false,
@@ -1178,6 +1190,7 @@ mod tests {
             max_checks: 4,
             port_range: None,
             vt_oids: None,
+            max_vts: None,
             exclude_hosts: None,
             discovery: None,
             profile_execution: false,

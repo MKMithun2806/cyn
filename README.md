@@ -97,6 +97,7 @@ Options:
       --max-hosts <N>       concurrent hosts   [default: 4]
       --max-checks <N>      checks per host    [default: 4]
       --vt <OID,OID,...>    specific VTs to run (bypasses selection)
+      --max-vts <N>         cap selected root VTs (dependencies may be added)
       --ports <RANGE>       discovery port filter, e.g. "22,80-443"
   -n, --nmap <FILE>         import ports from nmap XML file
       --exclude <HOSTS>     comma-separated hosts to skip
