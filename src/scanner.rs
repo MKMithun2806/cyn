@@ -200,6 +200,8 @@ pub async fn run_scan(
     let mut body_attempted = 0u32;
     let mut skipped: std::collections::BTreeMap<(String, String, String), u32> =
         std::collections::BTreeMap::new();
+    let mut selected_vt_outcomes: std::collections::BTreeMap<(String, String), u32> =
+        std::collections::BTreeMap::new();
 
     let mut stream = Box::pin(runner.stream());
     let mut total_results = 0usize;
@@ -210,6 +212,20 @@ pub async fn run_scan(
         match result {
             Ok(script_result) => {
                 phase_timings.add(script_result.timing);
+                if request
+                    .vt_oids
+                    .as_ref()
+                    .is_some_and(|oids| oids.contains(&script_result.oid))
+                {
+                    let outcome = match &script_result.kind {
+                        ScriptResultKind::ReturnCode(code) => format!("NASL exit code {code}"),
+                        ScriptResultKind::Error(error) => format!("NASL error: {error:?}"),
+                        kind => format!("prerequisite skip: {kind:?}"),
+                    };
+                    *selected_vt_outcomes
+                        .entry((script_result.oid.clone(), outcome))
+                        .or_default() += 1;
+                }
                 match &script_result.kind {
                     ScriptResultKind::MissingRequiredKey(key) => {
                         *skipped
@@ -301,6 +317,9 @@ pub async fn run_scan(
     );
     for ((reason, oid, prerequisite), count) in &skipped {
         eprintln!("  {reason}: {count} · {oid} · {prerequisite}");
+    }
+    for ((oid, outcome), count) in &selected_vt_outcomes {
+        eprintln!("  selected VT {oid}: {outcome} ({count} execution(s))");
     }
     let results = storage
         .remove(&ScanID(scan_id))
@@ -581,7 +600,7 @@ async fn seed_discovery_kb(
                     scan_ctx,
                     &context,
                     kb::KbKey::Service(kb::Service::Custom(name.to_ascii_lowercase())),
-                    KbItem::String(format!("{port}/{protocol}")),
+                    KbItem::Number(service.port as i64),
                 )
                 .await?;
                 if service.protocol == Protocol::Tcp {
@@ -598,7 +617,21 @@ async fn seed_discovery_kb(
                         scan_ctx,
                         &context,
                         kb::KbKey::Service(kb::Service::Custom("www".to_string())),
-                        KbItem::String(format!("{port}/{protocol}")),
+                        KbItem::Number(service.port as i64),
+                    )
+                    .await?;
+                }
+                if service.protocol == Protocol::Tcp
+                    && service
+                        .product
+                        .as_deref()
+                        .is_some_and(|product| product.to_ascii_lowercase().contains("distcc"))
+                {
+                    set_discovery_kb(
+                        scan_ctx,
+                        &context,
+                        kb::KbKey::Service(kb::Service::Custom("distcc".to_string())),
+                        KbItem::Number(service.port as i64),
                     )
                     .await?;
                 }
@@ -769,7 +802,7 @@ async fn seed_cpe_application(
         (&format!("get_app/{base_cpe}"), KbItem::String(entry)),
         (
             &format!("get_app/ports/{base_cpe}"),
-            KbItem::String(port.to_string()),
+            KbItem::Number(port as i64),
         ),
         (
             &format!("get_app/protocols/{base_cpe}"),

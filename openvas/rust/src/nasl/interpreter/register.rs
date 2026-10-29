@@ -126,6 +126,22 @@ impl Register {
         Var { name, scope_index }
     }
 
+    /// Declares a local variable without replacing a value already bound in
+    /// the current scope. NASL functions commonly repeat their parameter names
+    /// in `local_var`; those declarations must preserve the caller's values.
+    pub(super) fn add_local_if_absent<'a>(
+        &mut self,
+        name: &'a str,
+        value: RuntimeValue,
+    ) -> Var<'a> {
+        let scope_index = self.current_index();
+        let scope = &mut self.scopes[scope_index];
+        if !scope.variables.contains_key(name) {
+            scope.add_named(name, value);
+        }
+        Var { name, scope_index }
+    }
+
     pub(super) fn get<'a>(&self, name: &'a str) -> Option<Var<'a>> {
         let scope_index = self.scopes.len() - 1;
         self.get_from_scope(name, scope_index)

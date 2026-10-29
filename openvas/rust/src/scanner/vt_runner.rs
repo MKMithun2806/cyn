@@ -196,7 +196,7 @@ impl<'a> VTRunner<'a> {
         self.set_parameters(&mut register)?;
 
         // currently scans are limited to the target as well as the id.
-        tracing::debug!("running");
+        tracing::info!(oid = %self.vt.oid, filename = %self.vt.filename, "running VT");
         let (kind, mut timing) = self.execute_inner(code, register).await;
         timing.source_load = source_load;
         tracing::debug!(result=?kind, "finished");

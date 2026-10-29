@@ -142,6 +142,7 @@ mod operator {
     interpreter_test_ok!(equals_string, "\"1\" == \"1\";", true);
     interpreter_test_ok!(equals_string_unequal, "\"1\" == \"2\";", false);
     interpreter_test_ok!(equals_number, "1 != 1;", false);
+    interpreter_test_ok!(index_data_byte, "'ab'[0] == \"a\";", true);
     interpreter_test_ok!(not_equals_data, "'1' != '1';", false);
     interpreter_test_ok!(not_equals_data_unequal, "'1' != '2';", true);
     interpreter_test_ok!(not_equals_string, "\"1\" != \"1\";", false);
@@ -151,6 +152,7 @@ mod operator {
     interpreter_test_ok!(greater2, "1 < 0;", false);
     interpreter_test_ok!(less, "1 < 2;", true);
     interpreter_test_ok!(less2, "1 < 0;", false);
+    interpreter_test_ok!(null_is_zero_in_numeric_comparison, "0 < NULL;", false);
     interpreter_test_ok!(greater_equal, "1 >= 1;", true);
     interpreter_test_ok!(greater_equal_2, "1 >= 2;", false);
     interpreter_test_ok!(less_equal, "1 <= 1;", true);

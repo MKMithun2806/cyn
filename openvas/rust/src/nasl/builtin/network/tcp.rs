@@ -27,12 +27,22 @@ pub struct TcpDataStream {
 
 impl Read for TcpDataStream {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        match &mut self.tls {
+        let result = match &mut self.tls {
             Some(tls) => {
                 let mut stream = Stream::new(tls, &mut self.sock);
                 stream.read(buf)
             }
             _ => self.sock.read(buf),
+        };
+        match result {
+            // Linux may report socket read timeouts as WouldBlock.
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                Err(io::Error::new(io::ErrorKind::TimedOut, error))
+            }
+            // A peer reset after sending a response is the end of that byte
+            // stream. Expose EOF so recv() can return bytes already received.
+            Err(error) if error.kind() == io::ErrorKind::ConnectionReset => Ok(0),
+            result => result,
         }
     }
 }
@@ -243,6 +253,10 @@ impl TcpConnection {
                 Err(e) => return Err(e),
             }
         }
+        // NASL recv()/recv_line() use the socket's existing read timeout when
+        // no per-call timeout is supplied. Keep those reads bounded by the
+        // same scan preference used for connection attempts.
+        sock.set_read_timeout(Some(timeout))?;
         Ok(Self::new(
             TcpDataStream {
                 sock,

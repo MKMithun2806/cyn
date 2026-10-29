@@ -128,6 +128,13 @@ impl NaslValue {
         }
     }
 
+    fn as_number_or_null(&self) -> Result<i64, ErrorKind> {
+        match self {
+            NaslValue::Null => Ok(0),
+            _ => self.as_number(),
+        }
+    }
+
     pub(crate) fn convert_to_number(&self) -> i64 {
         match self {
             NaslValue::String(_) => 1,
@@ -200,6 +207,12 @@ impl NaslValue {
     }
 
     fn add_string(&self, rhs: &NaslValue) -> Option<NaslValue> {
+        if let (NaslValue::Data(lhs), NaslValue::Data(rhs)) = (self, rhs) {
+            let mut bytes = Vec::with_capacity(lhs.len() + rhs.len());
+            bytes.extend_from_slice(lhs);
+            bytes.extend_from_slice(rhs);
+            return Some(NaslValue::Data(bytes));
+        }
         let concatenated = || format!("{self}{rhs}");
         match self {
             NaslValue::String(_) => return Some(NaslValue::String(concatenated())),
@@ -214,7 +227,16 @@ impl NaslValue {
     }
 
     pub(super) fn index(&self, index: NaslValue) -> Result<NaslValue, ExprError> {
-        if let Some(arr) = self.as_array() {
+        if let NaslValue::Data(bytes) = self {
+            let numeric_index = index.as_number().map_err(ExprError::rhs)?;
+            let index = usize::try_from(numeric_index)
+                .map_err(|_| ErrorKind::NegativeIndex(numeric_index))
+                .map_err(ExprError::rhs)?;
+            bytes
+                .get(index)
+                .map(|byte| NaslValue::String(char::from(*byte).to_string()))
+                .ok_or_else(|| ExprError::lhs(ErrorKind::ArrayOutOfRange(index)))
+        } else if let Some(arr) = self.as_array() {
             // Backwards compatibility:
             // Indexing into an array with a non-integer value yields
             // Null (the array is interpreted as a dictionary with the
@@ -420,8 +442,8 @@ macro_rules! impl_number_operator {
     ($ident: ident, $path: expr) => {
         impl NaslValue {
             pub(super) fn $ident(&self, rhs: NaslValue) -> Result<NaslValue, ExprError> {
-                let n1 = self.as_number().map_err(|e| ExprError::lhs(e))?;
-                let n2 = rhs.as_number().map_err(|e| ExprError::rhs(e))?;
+                let n1 = self.as_number_or_null().map_err(|e| ExprError::lhs(e))?;
+                let n2 = rhs.as_number_or_null().map_err(|e| ExprError::rhs(e))?;
                 Ok($path(n1.$ident(&n2)))
             }
         }

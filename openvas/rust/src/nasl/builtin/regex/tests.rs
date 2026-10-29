@@ -146,3 +146,10 @@ fn eregmatch_first() {
         vec!["Bar".to_string()],
     );
 }
+
+#[test]
+fn eregmatch_returns_capture_groups_by_index() {
+    let mut t = TestBuilder::default();
+    t.run(r#"matches = eregmatch(string: "uid=1 gid=2", pattern: "(uid=[0-9]+.*gid=[0-9]+)");"#);
+    t.ok("matches[1];", "uid=1 gid=2");
+}

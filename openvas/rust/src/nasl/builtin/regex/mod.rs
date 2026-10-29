@@ -155,8 +155,15 @@ fn eregmatch(
             .find_iter(string)
             .map(|m| NaslValue::String(m.as_str().to_string()))
             .collect(),
-        false => match re.find(string) {
-            Some(s) => vec![NaslValue::String(s.as_str().to_string())],
+        false => match re.captures(string) {
+            Some(captures) => captures
+                .iter()
+                .map(|capture| {
+                    capture
+                        .map(|value| NaslValue::String(value.as_str().to_string()))
+                        .unwrap_or(NaslValue::Null)
+                })
+                .collect(),
             None => vec![],
         },
     };

@@ -433,7 +433,7 @@ fn send_shared(
 /// Args:
 /// takes the following named arguments:
 /// - socket: the socket, of course.
-/// - data: the data block. A string is expected here (pure or impure, this does not matter).
+/// - data: the data block. A string or byte-data value is accepted.
 /// - length: is optional and will be the full data length if not set
 /// - option: is the flags for the send() system call. You should not use a raw numeric value here.
 ///
@@ -442,11 +442,20 @@ fn send_shared(
 async fn send(
     sockets: &mut NaslSockets,
     socket: usize,
-    data: &[u8],
+    data: NaslValue,
     option: Option<i64>,
     len: Option<usize>,
 ) -> Result<usize, SocketError> {
-    send_shared(sockets, socket, data, option, len)
+    let data = match data {
+        NaslValue::Data(bytes) => bytes,
+        NaslValue::String(string) => string.into_bytes(),
+        _ => {
+            return Err(SocketError::WrongArgument(
+                "Expected string or byte data.".into(),
+            ));
+        }
+    };
+    send_shared(sockets, socket, &data, option, len)
 }
 
 fn recv_shared(
@@ -469,6 +478,9 @@ fn recv_shared(
         let timeout = Duration::from_secs(1);
         while pos < min {
             match conn.read_with_timeout(&mut data[pos..], timeout) {
+                // A closed peer cannot satisfy `min`; continuing on EOF would
+                // spin forever because each subsequent read returns zero.
+                Ok(0) => break,
                 Ok(n) => pos += n,
                 Err(e) if e.kind() == io::ErrorKind::TimedOut => break,
                 Err(e) => return Err(SocketError::from(e)),
@@ -520,10 +532,18 @@ async fn recv_line(
     let mut data = String::new();
     match sockets.get_open_socket_mut(socket)? {
         NaslSocket::Tcp(conn) => {
-            let pos = match convert_timeout(timeout) {
+            let result = match convert_timeout(timeout) {
                 Some(timeout) => conn.read_line_with_timeout(&mut data, timeout),
                 None => conn.read_line(&mut data),
-            }?;
+            };
+            let pos = match result {
+                Ok(pos) => pos,
+                // NASL recv_line returns the bytes read so far when its socket
+                // timeout expires, allowing protocol helpers to retry or
+                // inspect a partial response instead of aborting the VT.
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => data.len(),
+                Err(error) => return Err(SocketError::from(error)),
+            };
             Ok(NaslValue::Data(data.as_bytes()[..pos].to_vec()))
         }
         NaslSocket::Udp(_) => Err(SocketError::SupportedOnlyOnTcp("recv_line".into())),

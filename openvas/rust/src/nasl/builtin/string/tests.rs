@@ -28,6 +28,15 @@ fn raw_string() {
         "raw_string(0x7B, 1, 'Hallo');",
         vec![123u8, 1, 72, 97, 108, 108, 111],
     );
+    check_code_result("raw_string(0xC3) + raw_string(0xA9);", vec![0xC3u8, 0xA9]);
+}
+
+#[test]
+fn strcat_returns_text_for_mixed_values() {
+    check_code_result(
+        "strcat(\"Services/\", \"distcc\", \"/\", 3632);",
+        "Services/distcc/3632",
+    );
 }
 
 #[test]

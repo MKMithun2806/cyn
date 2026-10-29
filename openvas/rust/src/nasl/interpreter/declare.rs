@@ -31,7 +31,7 @@ impl Interpreter<'_> {
             let value = RuntimeValue::Value(NaslValue::Null);
             match scope_decl.scope {
                 VarScope::Local => {
-                    self.register.add_local(ident.to_str(), value);
+                    self.register.add_local_if_absent(ident.to_str(), value);
                 }
                 VarScope::Global => {
                     self.register.add_global(ident.to_str(), value);
@@ -87,5 +87,15 @@ mod tests {
             NaslValue::Null,
         );
         t.ok("test(a: 1, b: 2);", 3);
+    }
+
+    #[test]
+    fn local_var_declaration_preserves_function_argument() {
+        let mut t = TestBuilder::default();
+        t.ok(
+            "function test(proto) { local_var proto; return proto; }",
+            NaslValue::Null,
+        );
+        t.ok("test(proto: \"distcc\");", "distcc");
     }
 }

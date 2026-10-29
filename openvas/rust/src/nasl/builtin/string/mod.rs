@@ -82,6 +82,13 @@ fn raw_string(positional: CheckedPositionals<&NaslValue>) -> Vec<u8> {
     data
 }
 
+/// Concatenate NASL values as text. Unlike raw_string(), strcat() returns a
+/// string value suitable for keys and protocol text, rather than byte data.
+#[nasl_function]
+fn strcat(positional: CheckedPositionals<&NaslValue>) -> String {
+    positional.iter().map(|value| value.to_string()).collect()
+}
+
 /// NASL function to parse values into string representations
 #[nasl_function]
 fn string(positional: CheckedPositionals<&NaslValue>) -> Result<NaslValue, BuiltinError> {
@@ -480,7 +487,7 @@ function_set! {
         hexstr,
         hex,
         (raw_string, "raw_string"),
-        (raw_string, "strcat"),
+        strcat,
         tolower,
         toupper,
         strlen,
