@@ -682,6 +682,17 @@ async fn seed_discovery_kb(
                     service.service.as_deref(),
                 )
                 .await?;
+                if let Some(alias) = feed_cpe_alias(cpe) {
+                    seed_cpe_application(
+                        scan_ctx,
+                        &context,
+                        &alias,
+                        service.port,
+                        protocol,
+                        service.service.as_deref(),
+                    )
+                    .await?;
+                }
             }
             service_count += 1;
         }
@@ -783,6 +794,20 @@ fn cpe_base(cpe: &str) -> Option<String> {
     let fields: Vec<&str> = cpe.split(':').collect();
     let count = if cpe.starts_with("cpe:2.3:") { 5 } else { 4 };
     (fields.len() >= count).then(|| fields[..count].join(":"))
+}
+
+/// Normalize known Nmap CPE vendor spellings to the CPE identifiers used by
+/// feed checks, while retaining the original discovery CPE as evidence.
+fn feed_cpe_alias(cpe: &str) -> Option<String> {
+    let mut fields: Vec<&str> = cpe.split(':').collect();
+    let vendor_index = if cpe.starts_with("cpe:2.3:") { 3 } else { 2 };
+    let product_index = vendor_index + 1;
+    if fields.get(vendor_index) == Some(&"vsftpd") && fields.get(product_index) == Some(&"vsftpd") {
+        fields[vendor_index] = "vsftpd_project";
+        Some(fields.join(":"))
+    } else {
+        None
+    }
 }
 
 fn server_banner_key(server: &str) -> Option<String> {
